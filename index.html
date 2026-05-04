@@ -1,0 +1,381 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Print Farm Manager</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="hero">
+        <div class="hero__masthead">
+          <div>
+            <p class="eyebrow">Twirl Studio / Print Farm Control</p>
+            <h1>Print Manager</h1>
+            <p class="hero__copy">
+              Track printed parts, BOM requirements, finished goods, and the next jobs the farm should run.
+            </p>
+          </div>
+          <div class="hero__actions">
+            <button id="restore-sample-data" class="button button--secondary" type="button">
+              Restore sample data
+            </button>
+          </div>
+        </div>
+        <div id="summary-cards" class="summary-grid"></div>
+      </header>
+
+      <nav class="tab-bar" aria-label="Primary">
+        <button class="tab-button is-active" data-tab="dashboard" type="button">Dashboard</button>
+        <button class="tab-button" data-tab="parts" type="button">Parts</button>
+        <button class="tab-button" data-tab="products" type="button">Products</button>
+        <button class="tab-button" data-tab="printers" type="button">Printers</button>
+        <button class="tab-button" data-tab="queue" type="button">Print Queue</button>
+      </nav>
+
+      <main class="workspace">
+        <section id="dashboard-view" class="view">
+          <div class="dashboard-grid">
+            <section class="panel">
+              <div class="panel__head">
+                <div>
+                  <p class="panel__eyebrow">Finished Goods</p>
+                  <h2>Ready to sell</h2>
+                </div>
+              </div>
+              <div id="ready-products" class="list-stack"></div>
+            </section>
+
+            <section class="panel">
+              <div class="panel__head">
+                <div>
+                  <p class="panel__eyebrow">Assembly blockers</p>
+                  <h2>Cannot be assembled now</h2>
+                </div>
+              </div>
+              <div id="blocked-products" class="list-stack"></div>
+            </section>
+
+            <section class="panel">
+              <div class="panel__head">
+                <div>
+                  <p class="panel__eyebrow">Low stock</p>
+                  <h2>Parts below minimum</h2>
+                </div>
+              </div>
+              <div id="low-stock-parts" class="list-stack"></div>
+            </section>
+
+            <section class="panel">
+              <div class="panel__head">
+                <div>
+                  <p class="panel__eyebrow">Planning</p>
+                  <h2>Suggested next print jobs</h2>
+                </div>
+              </div>
+              <div id="suggested-jobs" class="list-stack"></div>
+            </section>
+
+            <section class="panel panel--wide">
+              <div class="panel__head">
+                <div>
+                  <p class="panel__eyebrow">Live queue</p>
+                  <h2>Current print queue</h2>
+                </div>
+              </div>
+              <div id="queue-snapshot" class="list-stack"></div>
+            </section>
+
+            <section class="panel panel--wide">
+              <div class="panel__head">
+                <div>
+                  <p class="panel__eyebrow">Recent output</p>
+                  <h2>Recently completed prints</h2>
+                </div>
+              </div>
+              <div id="completed-prints" class="list-stack"></div>
+            </section>
+          </div>
+        </section>
+
+        <section id="parts-view" class="view" hidden>
+          <div class="split-layout">
+            <section class="panel panel--form">
+              <div class="panel__head">
+                <div>
+                  <p class="panel__eyebrow">Part editor</p>
+                  <h2>Create or update a printed part</h2>
+                </div>
+              </div>
+              <form id="part-form" class="form-grid">
+                <input type="hidden" name="id" />
+
+                <label class="field">
+                  <span>Part name</span>
+                  <input name="name" type="text" maxlength="80" required />
+                </label>
+
+                <label class="field">
+                  <span>SKU / code</span>
+                  <input name="sku" type="text" maxlength="40" placeholder="WHIM-LEG-S" />
+                </label>
+
+                <label class="field">
+                  <span>Color</span>
+                  <input name="color" type="text" maxlength="40" placeholder="Blue" required />
+                </label>
+
+                <label class="field">
+                  <span>Material</span>
+                  <input name="material" type="text" maxlength="40" placeholder="PLA" required />
+                </label>
+
+                <label class="field">
+                  <span>Inventory on hand</span>
+                  <input name="inventoryQty" type="number" min="0" step="1" required />
+                </label>
+
+                <label class="field">
+                  <span>Minimum stock</span>
+                  <input name="minStock" type="number" min="0" step="1" required />
+                </label>
+
+                <label class="field">
+                  <span>Print time (minutes)</span>
+                  <input name="printTimeMinutes" type="number" min="0" step="1" required />
+                </label>
+
+                <label class="field field--full">
+                  <span>Image reference</span>
+                  <input
+                    name="imageRef"
+                    type="text"
+                    maxlength="240"
+                    placeholder="images/part.jpg or https://..."
+                  />
+                </label>
+
+                <label class="field field--full">
+                  <span>Print file reference</span>
+                  <input
+                    name="fileRef"
+                    type="text"
+                    maxlength="200"
+                    placeholder="models/giggle.stl or https://..."
+                  />
+                </label>
+
+                <label class="field field--full">
+                  <span>Notes</span>
+                  <textarea name="notes" rows="4" maxlength="240" placeholder="Nozzle, infill, tray placement..."></textarea>
+                </label>
+
+                <div class="form-actions field--full">
+                  <button class="button" type="submit">Add part</button>
+                  <button class="button button--ghost" data-action="cancel-part-edit" type="button" hidden>
+                    Cancel edit
+                  </button>
+                </div>
+              </form>
+            </section>
+
+            <section class="panel">
+              <div class="panel__head">
+                <div>
+                  <p class="panel__eyebrow">Part inventory</p>
+                  <h2>Printed parts on hand</h2>
+                </div>
+                <span id="parts-count" class="panel__meta"></span>
+              </div>
+              <div id="parts-list" class="card-grid"></div>
+            </section>
+          </div>
+        </section>
+
+        <section id="products-view" class="view" hidden>
+          <div class="split-layout">
+            <section class="panel panel--form">
+              <div class="panel__head">
+                <div>
+                  <p class="panel__eyebrow">Product editor</p>
+                  <h2>Define what each product needs</h2>
+                </div>
+              </div>
+              <form id="product-form" class="form-grid">
+                <input type="hidden" name="id" />
+
+                <label class="field">
+                  <span>Product name</span>
+                  <input name="name" type="text" maxlength="80" required />
+                </label>
+
+                <label class="field">
+                  <span>SKU / code</span>
+                  <input name="sku" type="text" maxlength="40" placeholder="GIGGLE-ROUGH" />
+                </label>
+
+                <label class="field">
+                  <span>Finished stock</span>
+                  <input name="finishedStock" type="number" min="0" step="1" required />
+                </label>
+
+                <label class="field">
+                  <span>Target stock</span>
+                  <input name="targetStock" type="number" min="0" step="1" required />
+                </label>
+
+                <label class="field field--full field--checkbox">
+                  <input name="active" type="checkbox" />
+                  <span>Product is active</span>
+                </label>
+
+                <label class="field field--full field--checkbox">
+                  <input name="requiresAssembly" type="checkbox" checked />
+                  <span>Requires assembly from printed parts</span>
+                </label>
+
+                <label class="field field--full">
+                  <span>Image reference</span>
+                  <input
+                    name="imageRef"
+                    type="text"
+                    maxlength="240"
+                    placeholder="images/product.jpg or https://..."
+                  />
+                </label>
+
+                <label class="field field--full">
+                  <span>Notes</span>
+                  <textarea name="notes" rows="4" maxlength="240" placeholder="Packaging, assembly notes, launch status..."></textarea>
+                </label>
+
+                <div id="product-requirements-section" class="field field--full">
+                  <div class="subhead">
+                    <div>
+                      <span class="subhead__title">Required printed parts</span>
+                      <p class="subhead__copy">Each row defines the quantity needed to build one finished unit.</p>
+                    </div>
+                    <button id="add-requirement-button" class="button button--secondary" data-action="add-requirement" type="button">
+                      Add requirement
+                    </button>
+                  </div>
+                  <div id="requirements-editor" class="requirements-stack"></div>
+                </div>
+
+                <div class="form-actions field--full">
+                  <button class="button" type="submit">Add product</button>
+                  <button class="button button--ghost" data-action="cancel-product-edit" type="button" hidden>
+                    Cancel edit
+                  </button>
+                </div>
+              </form>
+            </section>
+
+            <section class="panel">
+              <div class="panel__head">
+                <div>
+                  <p class="panel__eyebrow">Assembly status</p>
+                  <h2>Products and part requirements</h2>
+                </div>
+                <span id="products-count" class="panel__meta"></span>
+              </div>
+              <div id="products-list" class="card-grid"></div>
+            </section>
+          </div>
+        </section>
+
+        <section id="queue-view" class="view" hidden>
+          <div class="split-layout">
+            <section class="panel panel--form">
+              <div class="panel__head">
+                <div>
+                  <p class="panel__eyebrow">Auto Queue</p>
+                  <h2>Production demand from target stock</h2>
+                </div>
+              </div>
+              <div id="queue-summary" class="list-stack"></div>
+            </section>
+
+            <section class="panel">
+              <div class="panel__head">
+                <div>
+                  <p class="panel__eyebrow">Queue state</p>
+                  <h2>Needed, planned, running, failed</h2>
+                </div>
+                <span id="queue-count" class="panel__meta"></span>
+              </div>
+              <div id="queue-list" class="card-grid"></div>
+            </section>
+          </div>
+        </section>
+
+        <section id="printers-view" class="view" hidden>
+          <div class="split-layout">
+            <section class="panel panel--form">
+              <div class="panel__head">
+                <div>
+                  <p class="panel__eyebrow">Printer editor</p>
+                  <h2>Track active printer setups</h2>
+                </div>
+              </div>
+              <form id="printer-form" class="form-grid">
+                <input type="hidden" name="id" />
+
+                <label class="field">
+                  <span>Printer name</span>
+                  <input name="name" type="text" maxlength="80" required />
+                </label>
+
+                <label class="field">
+                  <span>Model</span>
+                  <input name="model" type="text" maxlength="80" placeholder="MK4, X1C, A1 Mini..." />
+                </label>
+
+                <label class="field">
+                  <span>Loaded color</span>
+                  <input name="color" type="text" maxlength="40" placeholder="Blue" required />
+                </label>
+
+                <label class="field">
+                  <span>Loaded material</span>
+                  <input name="material" type="text" maxlength="40" placeholder="PLA" required />
+                </label>
+
+                <label class="field field--full field--checkbox">
+                  <input name="active" type="checkbox" checked />
+                  <span>Printer is active and available for queue planning</span>
+                </label>
+
+                <label class="field field--full">
+                  <span>Notes</span>
+                  <textarea name="notes" rows="4" maxlength="240" placeholder="Nozzle size, current plate, maintenance note..."></textarea>
+                </label>
+
+                <div class="form-actions field--full">
+                  <button class="button" type="submit">Add printer</button>
+                  <button class="button button--ghost" data-action="cancel-printer-edit" type="button" hidden>
+                    Cancel edit
+                  </button>
+                </div>
+              </form>
+            </section>
+
+            <section class="panel">
+              <div class="panel__head">
+                <div>
+                  <p class="panel__eyebrow">Printer state</p>
+                  <h2>Active setups and queue coverage</h2>
+                </div>
+                <span id="printers-count" class="panel__meta"></span>
+              </div>
+              <div id="printers-list" class="card-grid"></div>
+            </section>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
