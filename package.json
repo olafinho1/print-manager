@@ -5,10 +5,14 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:cf": "wrangler pages dev",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "db:migrate:local": "wrangler d1 execute print-manager --local --file=./migrations/0001_initial.sql",
+    "db:migrate:remote": "wrangler d1 execute print-manager --remote --file=./migrations/0001_initial.sql"
   },
   "devDependencies": {
-    "vite": "^6.3.5"
+    "vite": "^6.3.5",
+    "wrangler": "^4.16.1"
   }
 }

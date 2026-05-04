@@ -1,0 +1,10 @@
+"$schema" = "./node_modules/wrangler/config-schema.json"
+name = "print-manager"
+compatibility_date = "2026-05-04"
+pages_build_output_dir = "./dist"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "print-manager"
+database_id = "ebe1b46e-e722-44ea-ab21-5e309be0c7c0"
+preview_database_id = "DB"

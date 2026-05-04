@@ -1,5 +1,5 @@
 (() => {
-  const STORAGE_KEY = "twirl-print-manager:v1";
+  const STATE_API_URL = "/api/state";
   const STATUS_ORDER = {
     in_progress: 0,
     planned: 1,
@@ -248,15 +248,28 @@
     partFormDraft: blankPartDraft(),
     productFormDraft: blankProductDraft(),
     printerFormDraft: blankPrinterDraft(),
+    backendUnavailable: false,
+    lastSyncedState: createEmptyState(),
   };
 
-  const state = loadState();
+  const state = createEmptyState();
   const dom = getDom();
 
   init();
 
-  function init() {
+  async function init() {
     bindEvents();
+    try {
+      const nextState = await fetchSharedState();
+      replaceStateInMemory(nextState);
+      ui.lastSyncedState = clone(nextState);
+    } catch (error) {
+      ui.backendUnavailable = true;
+      replaceStateInMemory(clone(seedState));
+      ui.lastSyncedState = clone(seedState);
+      const message = error instanceof Error ? error.message : "Unknown API error.";
+      window.alert(`Shared D1 state is unavailable. ${message} The UI loaded sample data only; saves will fail until the API is configured.`);
+    }
     render();
   }
 
@@ -330,7 +343,7 @@
     dom.printerForm.addEventListener("submit", handlePrinterSubmit);
   }
 
-  function handleClick(event) {
+  async function handleClick(event) {
     const target = event.target.closest("[data-action], [data-tab], #restore-sample-data");
     if (!target) {
       return;
@@ -340,9 +353,13 @@
       if (!window.confirm("Replace current data with the built-in sample dataset?")) {
         return;
       }
-      overwriteState(clone(seedState));
-      resetDrafts();
-      render();
+      try {
+        await overwriteState(clone(seedState));
+        resetDrafts();
+        render();
+      } catch (error) {
+        handlePersistenceError(error);
+      }
       return;
     }
 
@@ -354,87 +371,91 @@
 
     const { action, id, partId, quantity, index, status } = target.dataset;
 
-    switch (action) {
-      case "cancel-part-edit":
-        ui.partFormDraft = blankPartDraft();
-        renderPartForm();
-        break;
-      case "cancel-product-edit":
-        ui.productFormDraft = blankProductDraft();
-        renderProductForm();
-        break;
-      case "cancel-printer-edit":
-        ui.printerFormDraft = blankPrinterDraft();
-        renderPrinterForm();
-        break;
-      case "edit-part":
-        startPartEdit(id);
-        break;
-      case "delete-part":
-        deletePart(id);
-        break;
-      case "add-part-stock":
-        adjustPartStock(id, "add");
-        break;
-      case "adjust-part-stock":
-        adjustPartStock(id, "adjust");
-        break;
-      case "queue-part":
-        prefillQueueForPart(id);
-        break;
-      case "edit-product":
-        startProductEdit(id);
-        break;
-      case "delete-product":
-        deleteProduct(id);
-        break;
-      case "edit-printer":
-        startPrinterEdit(id);
-        break;
-      case "delete-printer":
-        deletePrinter(id);
-        break;
-      case "toggle-printer":
-        togglePrinter(id);
-        break;
-      case "toggle-product":
-        toggleProduct(id);
-        break;
-      case "assemble-product":
-        assembleProduct(id);
-        break;
-      case "adjust-finished-stock":
-        adjustFinishedStock(id);
-        break;
-      case "pack-product":
-        packProduct(id);
-        break;
-      case "add-requirement":
-        addRequirementRow();
-        break;
-      case "remove-requirement":
-        removeRequirementRow(Number(index));
-        break;
-      case "queue-suggestion":
-        openQueueView();
-        break;
-      case "queue-plan":
-        updateQueueState(partId, "plan");
-        break;
-      case "queue-start":
-        updateQueueState(partId, "start");
-        break;
-      case "queue-complete":
-        updateQueueState(partId, "complete");
-        break;
-      case "queue-fail":
-        updateQueueState(partId, "fail");
-        break;
-      case "queue-retry":
-        updateQueueState(partId, "retry");
-        break;
-      default:
-        break;
+    try {
+      switch (action) {
+        case "cancel-part-edit":
+          ui.partFormDraft = blankPartDraft();
+          renderPartForm();
+          break;
+        case "cancel-product-edit":
+          ui.productFormDraft = blankProductDraft();
+          renderProductForm();
+          break;
+        case "cancel-printer-edit":
+          ui.printerFormDraft = blankPrinterDraft();
+          renderPrinterForm();
+          break;
+        case "edit-part":
+          startPartEdit(id);
+          break;
+        case "delete-part":
+          await deletePart(id);
+          break;
+        case "add-part-stock":
+          await adjustPartStock(id, "add");
+          break;
+        case "adjust-part-stock":
+          await adjustPartStock(id, "adjust");
+          break;
+        case "queue-part":
+          prefillQueueForPart(id);
+          break;
+        case "edit-product":
+          startProductEdit(id);
+          break;
+        case "delete-product":
+          await deleteProduct(id);
+          break;
+        case "edit-printer":
+          startPrinterEdit(id);
+          break;
+        case "delete-printer":
+          await deletePrinter(id);
+          break;
+        case "toggle-printer":
+          await togglePrinter(id);
+          break;
+        case "toggle-product":
+          await toggleProduct(id);
+          break;
+        case "assemble-product":
+          await assembleProduct(id);
+          break;
+        case "adjust-finished-stock":
+          await adjustFinishedStock(id);
+          break;
+        case "pack-product":
+          await packProduct(id);
+          break;
+        case "add-requirement":
+          addRequirementRow();
+          break;
+        case "remove-requirement":
+          removeRequirementRow(Number(index));
+          break;
+        case "queue-suggestion":
+          openQueueView();
+          break;
+        case "queue-plan":
+          await updateQueueState(partId, "plan");
+          break;
+        case "queue-start":
+          await updateQueueState(partId, "start");
+          break;
+        case "queue-complete":
+          await updateQueueState(partId, "complete");
+          break;
+        case "queue-fail":
+          await updateQueueState(partId, "fail");
+          break;
+        case "queue-retry":
+          await updateQueueState(partId, "retry");
+          break;
+        default:
+          break;
+      }
+    } catch (error) {
+      handlePersistenceError(error);
     }
   }
 
@@ -1323,124 +1344,136 @@
     `;
   }
 
-  function handlePartSubmit(event) {
+  async function handlePartSubmit(event) {
     event.preventDefault();
 
-    const payload = normalizePart(readPartForm());
-    if (!payload.name || !payload.color || !payload.material) {
-      window.alert("Part name, color, and material are required.");
-      return;
-    }
-
-    if (payload.inventoryQty < 0 || payload.minStock < 0) {
-      window.alert("Inventory and minimum stock must be zero or greater.");
-      return;
-    }
-
-    const existingIndex = state.parts.findIndex((part) => part.id === payload.id);
-    const record = payload.id ? payload : { ...payload, id: generateId("part") };
-
-    if (existingIndex >= 0) {
-      state.parts.splice(existingIndex, 1, record);
-    } else {
-      state.parts.push(record);
-    }
-
-    persistState();
-    ui.partFormDraft = blankPartDraft();
-    render();
-  }
-
-  function handleProductSubmit(event) {
-    event.preventDefault();
-
-    const payload = normalizeProduct(readProductForm());
-    if (!payload.name) {
-      window.alert("Product name is required.");
-      return;
-    }
-
-    if (payload.finishedStock < 0 || payload.targetStock < 0) {
-      window.alert("Finished stock and target stock must be zero or greater.");
-      return;
-    }
-
-    if (payload.requiresAssembly) {
-      if (!payload.partRequirements.length) {
-        window.alert("Add at least one required printed part for products that require assembly.");
+    try {
+      const payload = normalizePart(readPartForm());
+      if (!payload.name || !payload.color || !payload.material) {
+        window.alert("Part name, color, and material are required.");
         return;
       }
 
-      const dedupedRequirements = new Map();
-      for (const requirement of payload.partRequirements) {
-        if (!requirement.partId) {
-          window.alert("Each requirement row must reference a part.");
-          return;
-        }
-        if (requirement.quantity <= 0) {
-          window.alert("Requirement quantities must be at least 1.");
-          return;
-        }
-        dedupedRequirements.set(
-          requirement.partId,
-          (dedupedRequirements.get(requirement.partId) || 0) + requirement.quantity,
-        );
-      }
-
-      payload.partRequirements = Array.from(dedupedRequirements.entries()).map(([partId, quantity]) => ({
-        partId,
-        quantity,
-      }));
-    } else {
-      const singleRequirement = payload.partRequirements.find((requirement) => requirement.partId);
-      if (!singleRequirement) {
-        window.alert("Products without assembly still need one printed part.");
+      if (payload.inventoryQty < 0 || payload.minStock < 0) {
+        window.alert("Inventory and minimum stock must be zero or greater.");
         return;
       }
-      payload.finishedStock = 0;
-      payload.partRequirements = [
-        {
-          partId: singleRequirement.partId,
-          quantity: 1,
-        },
-      ];
+
+      const existingIndex = state.parts.findIndex((part) => part.id === payload.id);
+      const record = payload.id ? payload : { ...payload, id: generateId("part") };
+
+      if (existingIndex >= 0) {
+        state.parts.splice(existingIndex, 1, record);
+      } else {
+        state.parts.push(record);
+      }
+
+      await persistState();
+      ui.partFormDraft = blankPartDraft();
+      render();
+    } catch (error) {
+      handlePersistenceError(error);
     }
-
-    const existingIndex = state.products.findIndex((product) => product.id === payload.id);
-    const record = payload.id ? payload : { ...payload, id: generateId("product") };
-
-    if (existingIndex >= 0) {
-      state.products.splice(existingIndex, 1, record);
-    } else {
-      state.products.push(record);
-    }
-
-    persistState();
-    ui.productFormDraft = blankProductDraft();
-    render();
   }
 
-  function handlePrinterSubmit(event) {
+  async function handleProductSubmit(event) {
     event.preventDefault();
 
-    const payload = normalizePrinter(readPrinterForm());
-    if (!payload.name || !payload.color || !payload.material) {
-      window.alert("Printer name, loaded color, and loaded material are required.");
-      return;
+    try {
+      const payload = normalizeProduct(readProductForm());
+      if (!payload.name) {
+        window.alert("Product name is required.");
+        return;
+      }
+
+      if (payload.finishedStock < 0 || payload.targetStock < 0) {
+        window.alert("Finished stock and target stock must be zero or greater.");
+        return;
+      }
+
+      if (payload.requiresAssembly) {
+        if (!payload.partRequirements.length) {
+          window.alert("Add at least one required printed part for products that require assembly.");
+          return;
+        }
+
+        const dedupedRequirements = new Map();
+        for (const requirement of payload.partRequirements) {
+          if (!requirement.partId) {
+            window.alert("Each requirement row must reference a part.");
+            return;
+          }
+          if (requirement.quantity <= 0) {
+            window.alert("Requirement quantities must be at least 1.");
+            return;
+          }
+          dedupedRequirements.set(
+            requirement.partId,
+            (dedupedRequirements.get(requirement.partId) || 0) + requirement.quantity,
+          );
+        }
+
+        payload.partRequirements = Array.from(dedupedRequirements.entries()).map(([partId, quantity]) => ({
+          partId,
+          quantity,
+        }));
+      } else {
+        const singleRequirement = payload.partRequirements.find((requirement) => requirement.partId);
+        if (!singleRequirement) {
+          window.alert("Products without assembly still need one printed part.");
+          return;
+        }
+        payload.finishedStock = 0;
+        payload.partRequirements = [
+          {
+            partId: singleRequirement.partId,
+            quantity: 1,
+          },
+        ];
+      }
+
+      const existingIndex = state.products.findIndex((product) => product.id === payload.id);
+      const record = payload.id ? payload : { ...payload, id: generateId("product") };
+
+      if (existingIndex >= 0) {
+        state.products.splice(existingIndex, 1, record);
+      } else {
+        state.products.push(record);
+      }
+
+      await persistState();
+      ui.productFormDraft = blankProductDraft();
+      render();
+    } catch (error) {
+      handlePersistenceError(error);
     }
+  }
 
-    const existingIndex = state.printers.findIndex((printer) => printer.id === payload.id);
-    const record = payload.id ? payload : { ...payload, id: generateId("printer") };
+  async function handlePrinterSubmit(event) {
+    event.preventDefault();
 
-    if (existingIndex >= 0) {
-      state.printers.splice(existingIndex, 1, record);
-    } else {
-      state.printers.push(record);
+    try {
+      const payload = normalizePrinter(readPrinterForm());
+      if (!payload.name || !payload.color || !payload.material) {
+        window.alert("Printer name, loaded color, and loaded material are required.");
+        return;
+      }
+
+      const existingIndex = state.printers.findIndex((printer) => printer.id === payload.id);
+      const record = payload.id ? payload : { ...payload, id: generateId("printer") };
+
+      if (existingIndex >= 0) {
+        state.printers.splice(existingIndex, 1, record);
+      } else {
+        state.printers.push(record);
+      }
+
+      await persistState();
+      ui.printerFormDraft = blankPrinterDraft();
+      render();
+    } catch (error) {
+      handlePersistenceError(error);
     }
-
-    persistState();
-    ui.printerFormDraft = blankPrinterDraft();
-    render();
   }
 
   function openQueueView() {
@@ -1478,7 +1511,7 @@
     render();
   }
 
-  function deletePart(id) {
+  async function deletePart(id) {
     const linkedProduct = state.products.find((product) =>
       product.partRequirements.some((requirement) => requirement.partId === id),
     );
@@ -1501,64 +1534,64 @@
     }
 
     state.parts = state.parts.filter((entry) => entry.id !== id);
-    persistState();
+    await persistState();
     if (ui.partFormDraft.id === id) {
       ui.partFormDraft = blankPartDraft();
     }
     render();
   }
 
-  function deleteProduct(id) {
+  async function deleteProduct(id) {
     const product = state.products.find((entry) => entry.id === id);
     if (!product || !window.confirm(`Delete product "${product.name}"?`)) {
       return;
     }
 
     state.products = state.products.filter((entry) => entry.id !== id);
-    persistState();
+    await persistState();
     if (ui.productFormDraft.id === id) {
       ui.productFormDraft = blankProductDraft();
     }
     render();
   }
 
-  function deletePrinter(id) {
+  async function deletePrinter(id) {
     const printer = state.printers.find((entry) => entry.id === id);
     if (!printer || !window.confirm(`Delete printer "${printer.name}"?`)) {
       return;
     }
 
     state.printers = state.printers.filter((entry) => entry.id !== id);
-    persistState();
+    await persistState();
     if (ui.printerFormDraft.id === id) {
       ui.printerFormDraft = blankPrinterDraft();
     }
     render();
   }
 
-  function toggleProduct(id) {
+  async function toggleProduct(id) {
     const product = state.products.find((entry) => entry.id === id);
     if (!product) {
       return;
     }
 
     product.active = !product.active;
-    persistState();
+    await persistState();
     render();
   }
 
-  function togglePrinter(id) {
+  async function togglePrinter(id) {
     const printer = state.printers.find((entry) => entry.id === id);
     if (!printer) {
       return;
     }
 
     printer.active = !printer.active;
-    persistState();
+    await persistState();
     render();
   }
 
-  function adjustPartStock(id, mode) {
+  async function adjustPartStock(id, mode) {
     const part = state.parts.find((entry) => entry.id === id);
     if (!part) {
       return;
@@ -1588,7 +1621,7 @@
     }
 
     part.inventoryQty = nextQty;
-    persistState();
+    await persistState();
     render();
   }
 
@@ -1614,7 +1647,7 @@
     renderProductForm();
   }
 
-  function assembleProduct(id) {
+  async function assembleProduct(id) {
     const computed = computeState();
     const product = computed.productSummaries.find((entry) => entry.id === id);
     if (!product) {
@@ -1658,11 +1691,11 @@
     });
     source.finishedStock += quantity;
 
-    persistState();
+    await persistState();
     render();
   }
 
-  function adjustFinishedStock(id) {
+  async function adjustFinishedStock(id) {
     const product = state.products.find((entry) => entry.id === id);
     if (!product) {
       return;
@@ -1692,11 +1725,11 @@
     }
 
     product.finishedStock += delta;
-    persistState();
+    await persistState();
     render();
   }
 
-  function packProduct(id) {
+  async function packProduct(id) {
     const computed = computeState();
     const product = computed.productSummaries.find((entry) => entry.id === id);
     if (!product) {
@@ -1742,11 +1775,11 @@
         }
       });
     }
-    persistState();
+    await persistState();
     render();
   }
 
-  function updateQueueState(partId, action) {
+  async function updateQueueState(partId, action) {
     const computed = computeState();
     const row = computed.queueByPartId.get(partId);
     if (!row) {
@@ -1833,7 +1866,7 @@
 
     entry.updatedAt = timestamp;
     cleanupPrintState();
-    persistState();
+    await persistState();
     render();
   }
 
@@ -2329,45 +2362,106 @@
     ui.printerFormDraft = blankPrinterDraft();
   }
 
-  function loadState() {
-    try {
-      const raw = window.localStorage.getItem(STORAGE_KEY);
-      if (!raw) {
-        return clone(seedState);
-      }
-      const parsed = JSON.parse(raw);
-      const legacyMigration = migrateLegacyPrintJobs(Array.isArray(parsed.printJobs) ? parsed.printJobs : []);
-      return {
-        parts: Array.isArray(parsed.parts) ? parsed.parts.map((part) => normalizePart(part)) : clone(seedState.parts),
-        products: Array.isArray(parsed.products)
-          ? parsed.products.map((product) => normalizeProduct(product))
-          : clone(seedState.products),
-        printers: Array.isArray(parsed.printers)
-          ? parsed.printers.map((printer) => normalizePrinter(printer))
-          : [],
-        printState: Array.isArray(parsed.printState)
-          ? parsed.printState.map((entry) => normalizePrintStateEntry(entry))
-          : legacyMigration.printState,
-        completedPrints: Array.isArray(parsed.completedPrints)
-          ? parsed.completedPrints.map((entry) => normalizeCompletedPrintEntry(entry))
-          : legacyMigration.completedPrints,
-      };
-    } catch (error) {
-      return clone(seedState);
+  function createEmptyState() {
+    return {
+      parts: [],
+      products: [],
+      printers: [],
+      printState: [],
+      completedPrints: [],
+    };
+  }
+
+  async function fetchSharedState() {
+    const response = await window.fetch(STATE_API_URL, {
+      headers: {
+        accept: "application/json",
+      },
+    });
+    if (!response.ok) {
+      throw new Error(await readApiError(response, `Failed to load shared state (${response.status}).`));
     }
+
+    const parsed = await response.json();
+    const legacyMigration = migrateLegacyPrintJobs(Array.isArray(parsed.printJobs) ? parsed.printJobs : []);
+    return {
+      parts: Array.isArray(parsed.parts) ? parsed.parts.map((part) => normalizePart(part)) : clone(seedState.parts),
+      products: Array.isArray(parsed.products)
+        ? parsed.products.map((product) => normalizeProduct(product))
+        : clone(seedState.products),
+      printers: Array.isArray(parsed.printers)
+        ? parsed.printers.map((printer) => normalizePrinter(printer))
+        : [],
+      printState: Array.isArray(parsed.printState)
+        ? parsed.printState.map((entry) => normalizePrintStateEntry(entry))
+        : legacyMigration.printState,
+      completedPrints: Array.isArray(parsed.completedPrints)
+        ? parsed.completedPrints.map((entry) => normalizeCompletedPrintEntry(entry))
+        : legacyMigration.completedPrints,
+    };
   }
 
-  function persistState() {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  async function persistState() {
+    const response = await window.fetch(STATE_API_URL, {
+      method: "PUT",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json",
+      },
+      body: JSON.stringify({
+        parts: state.parts,
+        products: state.products,
+        printers: state.printers,
+        printState: state.printState,
+        completedPrints: state.completedPrints,
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(await readApiError(response, `Failed to save shared state (${response.status}).`));
+    }
+
+    ui.backendUnavailable = false;
+    ui.lastSyncedState = clone({
+      parts: state.parts,
+      products: state.products,
+      printers: state.printers,
+      printState: state.printState,
+      completedPrints: state.completedPrints,
+    });
   }
 
-  function overwriteState(nextState) {
+  async function overwriteState(nextState) {
+    replaceStateInMemory(nextState);
+    await persistState();
+  }
+
+  function replaceStateInMemory(nextState) {
     state.parts = nextState.parts;
     state.products = nextState.products;
     state.printers = nextState.printers;
     state.printState = nextState.printState;
     state.completedPrints = nextState.completedPrints;
-    persistState();
+  }
+
+  function handlePersistenceError(error) {
+    const message = error instanceof Error ? error.message : "Unexpected persistence error.";
+    replaceStateInMemory(clone(ui.lastSyncedState));
+    render();
+    window.alert(message);
+    console.error(error);
+  }
+
+  async function readApiError(response, fallbackMessage) {
+    try {
+      const payload = await response.json();
+      if (payload && typeof payload.error === "string" && payload.error) {
+        return payload.error;
+      }
+    } catch (error) {
+      // Ignore JSON parse errors and fall back to status-based message.
+    }
+    return fallbackMessage;
   }
 
   function clone(value) {
