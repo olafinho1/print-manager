@@ -18,6 +18,11 @@
             </p>
           </div>
           <div class="hero__actions">
+            <p id="signed-in-user" class="hero__identity"></p>
+            <label class="hero__session">
+              <span id="operator-label">Operator</span>
+              <input id="operator-name" type="text" maxlength="80" placeholder="Who is working now?" />
+            </label>
             <button id="restore-sample-data" class="button button--secondary" type="button">
               Restore sample data
             </button>
@@ -95,6 +100,17 @@
                 </div>
               </div>
               <div id="completed-prints" class="list-stack"></div>
+            </section>
+
+            <section class="panel panel--wide">
+              <div class="panel__head">
+                <div>
+                  <p class="panel__eyebrow">History</p>
+                  <h2>Recent activity</h2>
+                </div>
+              </div>
+              <div id="dashboard-activity-toolbar" class="activity-toolbar"></div>
+              <div id="recent-activity" class="list-stack"></div>
             </section>
           </div>
         </section>
@@ -188,6 +204,7 @@
                 </div>
                 <span id="parts-count" class="panel__meta"></span>
               </div>
+              <div id="parts-activity-toolbar" class="activity-toolbar"></div>
               <div id="parts-list" class="card-grid"></div>
             </section>
           </div>
@@ -280,6 +297,7 @@
                 </div>
                 <span id="products-count" class="panel__meta"></span>
               </div>
+              <div id="products-activity-toolbar" class="activity-toolbar"></div>
               <div id="products-list" class="card-grid"></div>
             </section>
           </div>

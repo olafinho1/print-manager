@@ -1,5 +1,24 @@
 (() => {
   const STATE_API_URL = "/api/state";
+  const API_ENDPOINTS = {
+    parts: "/api/parts",
+    partsDelete: "/api/parts-delete",
+    partsInventory: "/api/parts-inventory",
+    products: "/api/products",
+    productsDelete: "/api/products-delete",
+    productActions: "/api/product-actions",
+    printers: "/api/printers",
+    printersDelete: "/api/printers-delete",
+    printerActions: "/api/printer-actions",
+    queueActions: "/api/queue-actions",
+  };
+  const SESSION_OPERATOR_KEY = "print-manager.operator-name";
+  const DEFAULT_ACTIVITY_FILTERS = {
+    actor: "all",
+    scope: "all",
+    action: "all",
+    window: "30",
+  };
   const STATUS_ORDER = {
     in_progress: 0,
     planned: 1,
@@ -241,6 +260,9 @@
         completedAt: "2026-05-02T05:40:00.000Z",
       },
     ],
+    partInventoryMovements: [],
+    finishedInventoryMovements: [],
+    printEvents: [],
   };
 
   const ui = {
@@ -248,6 +270,10 @@
     partFormDraft: blankPartDraft(),
     productFormDraft: blankProductDraft(),
     printerFormDraft: blankPrinterDraft(),
+    operatorName: readSessionOperatorName(),
+    activityFilters: { ...DEFAULT_ACTIVITY_FILTERS },
+    currentUser: createEmptyAuthMeta(),
+    appMeta: createEmptyAppMeta(),
     backendUnavailable: false,
     lastSyncedState: createEmptyState(),
   };
@@ -265,6 +291,12 @@
       ui.lastSyncedState = clone(nextState);
     } catch (error) {
       ui.backendUnavailable = true;
+      ui.currentUser = createEmptyAuthMeta();
+      ui.appMeta = {
+        environment: "local",
+        canRestoreSampleData: true,
+        hostname: window.location.hostname,
+      };
       replaceStateInMemory(clone(seedState));
       ui.lastSyncedState = clone(seedState);
       const message = error instanceof Error ? error.message : "Unknown API error.";
@@ -276,16 +308,23 @@
   function getDom() {
     return {
       summaryCards: document.querySelector("#summary-cards"),
+      operatorName: document.querySelector("#operator-name"),
+      operatorLabel: document.querySelector("#operator-label"),
+      signedInUser: document.querySelector("#signed-in-user"),
       readyProducts: document.querySelector("#ready-products"),
       blockedProducts: document.querySelector("#blocked-products"),
       lowStockParts: document.querySelector("#low-stock-parts"),
       suggestedJobs: document.querySelector("#suggested-jobs"),
       queueSnapshot: document.querySelector("#queue-snapshot"),
       completedPrints: document.querySelector("#completed-prints"),
+      recentActivity: document.querySelector("#recent-activity"),
+      dashboardActivityToolbar: document.querySelector("#dashboard-activity-toolbar"),
       partsList: document.querySelector("#parts-list"),
       partsCount: document.querySelector("#parts-count"),
+      partsActivityToolbar: document.querySelector("#parts-activity-toolbar"),
       productsList: document.querySelector("#products-list"),
       productsCount: document.querySelector("#products-count"),
+      productsActivityToolbar: document.querySelector("#products-activity-toolbar"),
       printersList: document.querySelector("#printers-list"),
       printersCount: document.querySelector("#printers-count"),
       queueList: document.querySelector("#queue-list"),
@@ -313,6 +352,7 @@
 
   function bindEvents() {
     document.addEventListener("click", handleClick);
+    document.addEventListener("change", handleGlobalChange);
 
     dom.partForm.addEventListener("input", () => {
       ui.partFormDraft = readPartForm();
@@ -341,6 +381,27 @@
       ui.printerFormDraft = readPrinterForm();
     });
     dom.printerForm.addEventListener("submit", handlePrinterSubmit);
+
+    if (dom.operatorName) {
+      dom.operatorName.value = ui.operatorName;
+      dom.operatorName.addEventListener("input", handleOperatorInput);
+    }
+  }
+
+  function handleGlobalChange(event) {
+    const filterKey = event.target?.dataset?.activityFilter;
+    if (!filterKey) {
+      return;
+    }
+
+    ui.activityFilters[filterKey] = event.target.value || DEFAULT_ACTIVITY_FILTERS[filterKey] || "all";
+    render();
+  }
+
+  function handleOperatorInput(event) {
+    ui.operatorName = normalizeActorName(event.target.value || "");
+    writeSessionOperatorName(ui.operatorName);
+    renderActivityToolbars(ui.lastComputed || computeState());
   }
 
   async function handleClick(event) {
@@ -354,7 +415,7 @@
         return;
       }
       try {
-        await overwriteState(clone(seedState));
+        await replaceSharedState(clone(seedState));
         resetDrafts();
         render();
       } catch (error) {
@@ -461,8 +522,10 @@
 
   function render() {
     const computed = computeState();
+    ui.lastComputed = computed;
 
     renderTabs();
+    renderHeader();
     renderSummaryCards(computed);
     renderDashboard(computed);
     renderPartForm();
@@ -473,6 +536,7 @@
     renderPrintersList(computed);
     renderQueueSummary(computed);
     renderQueueList(computed);
+    renderActivityToolbars(computed);
   }
 
   function renderTabs() {
@@ -484,6 +548,30 @@
     Object.entries(dom.views).forEach(([key, view]) => {
       view.hidden = key !== ui.activeTab;
     });
+  }
+
+  function renderHeader() {
+    if (dom.signedInUser) {
+      dom.signedInUser.textContent = ui.currentUser.authenticated
+        ? `Signed in as ${ui.currentUser.email}`
+        : ui.appMeta.environment === "local"
+          ? "Local development session"
+          : "Authentication not detected";
+    }
+
+    if (dom.operatorLabel) {
+      dom.operatorLabel.textContent = ui.currentUser.authenticated ? "Operator override" : "Operator";
+    }
+
+    if (dom.operatorName) {
+      dom.operatorName.placeholder = ui.currentUser.authenticated
+        ? `Blank uses ${ui.currentUser.email}`
+        : "Who is working now?";
+    }
+
+    if (dom.restoreSampleData) {
+      dom.restoreSampleData.hidden = !ui.appMeta.canRestoreSampleData;
+    }
   }
 
   function renderSummaryCards(computed) {
@@ -731,6 +819,15 @@
       "No completed prints have been logged yet.",
       "Completing queue quantities automatically adds them to part inventory.",
     );
+
+    dom.recentActivity.innerHTML = renderList(
+      computed.recentActivity,
+      (entry) => renderActivityCard(entry),
+      computed.isActivityFilterActive ? "No activity matches the current filters." : "No recent activity has been recorded yet.",
+      computed.isActivityFilterActive
+        ? "Change actor, scope, action, or time filters to widen the feed."
+        : "Assembly, packing, queue changes, and stock movements will appear here.",
+    );
   }
 
   function renderPartForm() {
@@ -760,6 +857,8 @@
         const queueRow = computed.queueByPartId.get(part.id);
         const openJobs = queueRow ? queueRow.plannedQty + queueRow.inProgressQty : 0;
         const usedInProducts = computed.productsUsingPart.get(part.id) || [];
+        const partHistory = computed.partHistoryById.get(part.id) || [];
+        const hasAnyPartHistory = (computed.partHistoryTotalById.get(part.id) || 0) > 0;
         return `
           <article class="entity-card">
             <div class="${part.imageRef ? "card-hero" : ""}">
@@ -830,6 +929,20 @@
             }
 
             ${part.notes ? `<p class="helper-text">${formatParagraph(part.notes)}</p>` : ""}
+
+            ${
+              partHistory.length
+                ? `
+                  <div class="activity-stack">
+                    ${partHistory.map((entry) => renderMiniActivity(entry)).join("")}
+                  </div>
+                `
+                : `<p class="helper-text">${
+                    computed.isActivityFilterActive && hasAnyPartHistory
+                      ? "No part activity matches the current filters."
+                      : "No part activity has been recorded yet."
+                  }</p>`
+            }
 
             <div class="card-actions">
               <button class="button button--small" data-action="edit-part" data-id="${escapeHtml(part.id)}" type="button">
@@ -966,6 +1079,8 @@
       computed.productSummaries,
       (product) => {
         const productImage = resolveProductImage(product);
+        const productHistory = computed.productHistoryById.get(product.id) || [];
+        const hasAnyProductHistory = (computed.productHistoryTotalById.get(product.id) || 0) > 0;
         return `
         <article class="entity-card">
           <div class="${productImage ? "card-hero" : ""}">
@@ -1045,6 +1160,20 @@
           }
 
           ${product.notes ? `<p class="helper-text">${formatParagraph(product.notes)}</p>` : ""}
+
+          ${
+            productHistory.length
+              ? `
+                <div class="activity-stack">
+                  ${productHistory.map((entry) => renderMiniActivity(entry)).join("")}
+                </div>
+              `
+              : `<p class="helper-text">${
+                  computed.isActivityFilterActive && hasAnyProductHistory
+                    ? "No product activity matches the current filters."
+                    : "No product activity has been recorded yet."
+                }</p>`
+          }
 
           <div class="card-actions">
             <button class="button button--small" data-action="edit-product" data-id="${escapeHtml(product.id)}" type="button">
@@ -1359,16 +1488,9 @@
         return;
       }
 
-      const existingIndex = state.parts.findIndex((part) => part.id === payload.id);
-      const record = payload.id ? payload : { ...payload, id: generateId("part") };
-
-      if (existingIndex >= 0) {
-        state.parts.splice(existingIndex, 1, record);
-      } else {
-        state.parts.push(record);
-      }
-
-      await persistState();
+      await mutateState(API_ENDPOINTS.parts, {
+        part: payload.id ? payload : { ...payload, id: generateId("part") },
+      });
       ui.partFormDraft = blankPartDraft();
       render();
     } catch (error) {
@@ -1432,16 +1554,9 @@
         ];
       }
 
-      const existingIndex = state.products.findIndex((product) => product.id === payload.id);
-      const record = payload.id ? payload : { ...payload, id: generateId("product") };
-
-      if (existingIndex >= 0) {
-        state.products.splice(existingIndex, 1, record);
-      } else {
-        state.products.push(record);
-      }
-
-      await persistState();
+      await mutateState(API_ENDPOINTS.products, {
+        product: payload.id ? payload : { ...payload, id: generateId("product") },
+      });
       ui.productFormDraft = blankProductDraft();
       render();
     } catch (error) {
@@ -1459,16 +1574,9 @@
         return;
       }
 
-      const existingIndex = state.printers.findIndex((printer) => printer.id === payload.id);
-      const record = payload.id ? payload : { ...payload, id: generateId("printer") };
-
-      if (existingIndex >= 0) {
-        state.printers.splice(existingIndex, 1, record);
-      } else {
-        state.printers.push(record);
-      }
-
-      await persistState();
+      await mutateState(API_ENDPOINTS.printers, {
+        printer: payload.id ? payload : { ...payload, id: generateId("printer") },
+      });
       ui.printerFormDraft = blankPrinterDraft();
       render();
     } catch (error) {
@@ -1533,8 +1641,7 @@
       return;
     }
 
-    state.parts = state.parts.filter((entry) => entry.id !== id);
-    await persistState();
+    await mutateState(API_ENDPOINTS.partsDelete, { id });
     if (ui.partFormDraft.id === id) {
       ui.partFormDraft = blankPartDraft();
     }
@@ -1547,8 +1654,7 @@
       return;
     }
 
-    state.products = state.products.filter((entry) => entry.id !== id);
-    await persistState();
+    await mutateState(API_ENDPOINTS.productsDelete, { id });
     if (ui.productFormDraft.id === id) {
       ui.productFormDraft = blankProductDraft();
     }
@@ -1561,8 +1667,7 @@
       return;
     }
 
-    state.printers = state.printers.filter((entry) => entry.id !== id);
-    await persistState();
+    await mutateState(API_ENDPOINTS.printersDelete, { id });
     if (ui.printerFormDraft.id === id) {
       ui.printerFormDraft = blankPrinterDraft();
     }
@@ -1575,8 +1680,11 @@
       return;
     }
 
-    product.active = !product.active;
-    await persistState();
+    await mutateState(API_ENDPOINTS.productActions, {
+      action: "toggle",
+      productId: id,
+      active: !product.active,
+    });
     render();
   }
 
@@ -1586,8 +1694,11 @@
       return;
     }
 
-    printer.active = !printer.active;
-    await persistState();
+    await mutateState(API_ENDPOINTS.printerActions, {
+      action: "toggle",
+      printerId: id,
+      active: !printer.active,
+    });
     render();
   }
 
@@ -1620,8 +1731,15 @@
       return;
     }
 
-    part.inventoryQty = nextQty;
-    await persistState();
+    await mutateState(API_ENDPOINTS.partsInventory, {
+      partId: id,
+      delta: appliedDelta,
+      reason: mode === "add" ? "manual_add" : "manual_adjustment",
+      note:
+        mode === "add"
+          ? "Completed parts added through the Add stock action."
+          : "Inventory adjusted through the Adjust action.",
+    });
     render();
   }
 
@@ -1682,16 +1800,11 @@
       return;
     }
 
-    const source = state.products.find((entry) => entry.id === id);
-    source.partRequirements.forEach((requirement) => {
-      const part = state.parts.find((entry) => entry.id === requirement.partId);
-      if (part) {
-        part.inventoryQty -= requirement.quantity * quantity;
-      }
+    await mutateState(API_ENDPOINTS.productActions, {
+      action: "assemble",
+      productId: id,
+      quantity,
     });
-    source.finishedStock += quantity;
-
-    await persistState();
     render();
   }
 
@@ -1724,8 +1837,11 @@
       return;
     }
 
-    product.finishedStock += delta;
-    await persistState();
+    await mutateState(API_ENDPOINTS.productActions, {
+      action: "adjust_finished_stock",
+      productId: id,
+      delta,
+    });
     render();
   }
 
@@ -1764,18 +1880,11 @@
       return;
     }
 
-    const source = state.products.find((entry) => entry.id === id);
-    if (product.requiresAssembly) {
-      source.finishedStock -= quantity;
-    } else {
-      source.partRequirements.forEach((requirement) => {
-        const part = state.parts.find((entry) => entry.id === requirement.partId);
-        if (part) {
-          part.inventoryQty -= requirement.quantity * quantity;
-        }
-      });
-    }
-    await persistState();
+    await mutateState(API_ENDPOINTS.productActions, {
+      action: "pack",
+      productId: id,
+      quantity,
+    });
     render();
   }
 
@@ -1786,9 +1895,6 @@
       return;
     }
 
-    const entry = getOrCreatePrintStateEntry(partId);
-    const timestamp = new Date().toISOString();
-
     if (action === "plan") {
       if (row.remainingQty <= 0) {
         window.alert("There is no unplanned quantity remaining for this part.");
@@ -1798,7 +1904,11 @@
       if (quantity === null) {
         return;
       }
-      entry.plannedQty += quantity;
+      await mutateState(API_ENDPOINTS.queueActions, {
+        action,
+        partId,
+        quantity,
+      });
     } else if (action === "start") {
       const maxStart = row.plannedQty + row.remainingQty;
       if (maxStart <= 0) {
@@ -1809,9 +1919,11 @@
       if (quantity === null) {
         return;
       }
-      const fromPlanned = Math.min(entry.plannedQty, quantity);
-      entry.plannedQty -= fromPlanned;
-      entry.inProgressQty += quantity;
+      await mutateState(API_ENDPOINTS.queueActions, {
+        action,
+        partId,
+        quantity,
+      });
     } else if (action === "complete") {
       const maxComplete = row.inProgressQty + row.plannedQty + row.remainingQty;
       if (maxComplete <= 0) {
@@ -1822,21 +1934,10 @@
       if (quantity === null) {
         return;
       }
-      let remainder = quantity;
-      const fromInProgress = Math.min(entry.inProgressQty, remainder);
-      entry.inProgressQty -= fromInProgress;
-      remainder -= fromInProgress;
-      const fromPlanned = Math.min(entry.plannedQty, remainder);
-      entry.plannedQty -= fromPlanned;
-      const part = state.parts.find((candidate) => candidate.id === partId);
-      if (part) {
-        part.inventoryQty += quantity;
-      }
-      state.completedPrints.unshift({
-        id: generateId("completion"),
+      await mutateState(API_ENDPOINTS.queueActions, {
+        action,
         partId,
         quantity,
-        completedAt: timestamp,
       });
     } else if (action === "fail") {
       if (row.inProgressQty <= 0) {
@@ -1847,8 +1948,11 @@
       if (quantity === null) {
         return;
       }
-      entry.inProgressQty -= quantity;
-      entry.failedQty += quantity;
+      await mutateState(API_ENDPOINTS.queueActions, {
+        action,
+        partId,
+        quantity,
+      });
     } else if (action === "retry") {
       if (row.failedQty <= 0) {
         window.alert("There is no failed quantity to retry.");
@@ -1858,15 +1962,14 @@
       if (quantity === null) {
         return;
       }
-      entry.failedQty -= quantity;
-      entry.plannedQty += quantity;
+      await mutateState(API_ENDPOINTS.queueActions, {
+        action,
+        partId,
+        quantity,
+      });
     } else {
       return;
     }
-
-    entry.updatedAt = timestamp;
-    cleanupPrintState();
-    await persistState();
     render();
   }
 
@@ -1915,6 +2018,48 @@
     });
 
     const productSummaries = products.map((product) => summarizeProduct(product, partsById));
+    const partActivityEntries = buildPartActivityEntries(state, partsById);
+    const productActivityEntries = buildProductActivityEntries(state, new Map(products.map((product) => [product.id, product])));
+    const allActivityEntries = [...partActivityEntries, ...productActivityEntries].sort(
+      (left, right) => new Date(right.timestamp).getTime() - new Date(left.timestamp).getTime(),
+    );
+    const filteredActivityEntries = filterActivityEntries(allActivityEntries, ui.activityFilters);
+    const activityActors = buildActivityActorOptions(allActivityEntries);
+    const activityActions = buildActivityActionOptions(allActivityEntries);
+    const partHistoryById = new Map();
+    const productHistoryById = new Map();
+    const partHistoryTotalById = new Map();
+    const productHistoryTotalById = new Map();
+
+    partActivityEntries.forEach((entry) => {
+      partHistoryTotalById.set(entry.entityId, (partHistoryTotalById.get(entry.entityId) || 0) + 1);
+    });
+
+    productActivityEntries.forEach((entry) => {
+      productHistoryTotalById.set(entry.entityId, (productHistoryTotalById.get(entry.entityId) || 0) + 1);
+    });
+
+    filteredActivityEntries
+      .filter((entry) => entry.scope === "part" || entry.scope === "queue")
+      .forEach((entry) => {
+      const list = partHistoryById.get(entry.entityId) || [];
+      if (list.length < 4) {
+        list.push(entry);
+      }
+      partHistoryById.set(entry.entityId, list);
+    });
+
+    filteredActivityEntries
+      .filter((entry) => entry.scope === "product")
+      .forEach((entry) => {
+      const list = productHistoryById.get(entry.entityId) || [];
+      if (list.length < 4) {
+        list.push(entry);
+      }
+      productHistoryById.set(entry.entityId, list);
+    });
+
+    const recentActivity = filteredActivityEntries.slice(0, 12);
     const readyToSell = productSummaries.filter((product) => product.onHandNow > 0);
     const blockedProducts = productSummaries.filter(
       (product) => product.active && product.missingForNextUnit.length > 0,
@@ -2098,6 +2243,14 @@
       activePrinters,
       partsById,
       completedJobs,
+      recentActivity,
+      activityActors,
+      activityActions,
+      isActivityFilterActive: isActivityFilterActive(),
+      partHistoryById,
+      partHistoryTotalById,
+      productHistoryById,
+      productHistoryTotalById,
       productSummaries,
       printerSummaries,
       readyToSell,
@@ -2369,20 +2522,29 @@
       printers: [],
       printState: [],
       completedPrints: [],
+      partInventoryMovements: [],
+      finishedInventoryMovements: [],
+      printEvents: [],
     };
   }
 
-  async function fetchSharedState() {
-    const response = await window.fetch(STATE_API_URL, {
-      headers: {
-        accept: "application/json",
-      },
-    });
-    if (!response.ok) {
-      throw new Error(await readApiError(response, `Failed to load shared state (${response.status}).`));
-    }
+  function createEmptyAuthMeta() {
+    return {
+      authenticated: false,
+      email: "",
+      source: "anonymous",
+    };
+  }
 
-    const parsed = await response.json();
+  function createEmptyAppMeta() {
+    return {
+      environment: "local",
+      canRestoreSampleData: true,
+      hostname: window.location.hostname,
+    };
+  }
+
+  function normalizeRemoteState(parsed) {
     const legacyMigration = migrateLegacyPrintJobs(Array.isArray(parsed.printJobs) ? parsed.printJobs : []);
     return {
       parts: Array.isArray(parsed.parts) ? parsed.parts.map((part) => normalizePart(part)) : clone(seedState.parts),
@@ -2398,22 +2560,58 @@
       completedPrints: Array.isArray(parsed.completedPrints)
         ? parsed.completedPrints.map((entry) => normalizeCompletedPrintEntry(entry))
         : legacyMigration.completedPrints,
+      partInventoryMovements: Array.isArray(parsed.partInventoryMovements)
+        ? parsed.partInventoryMovements.map((entry) => normalizePartInventoryMovement(entry))
+        : [],
+      finishedInventoryMovements: Array.isArray(parsed.finishedInventoryMovements)
+        ? parsed.finishedInventoryMovements.map((entry) => normalizeFinishedInventoryMovement(entry))
+        : [],
+      printEvents: Array.isArray(parsed.printEvents) ? parsed.printEvents.map((entry) => normalizePrintEvent(entry)) : [],
+      meta: normalizeRemoteMeta(parsed.meta),
     };
   }
 
-  async function persistState() {
+  function normalizeRemoteMeta(meta) {
+    return {
+      auth: {
+        authenticated: Boolean(meta?.auth?.authenticated),
+        email: normalizeActorName(meta?.auth?.email),
+        source: String(meta?.auth?.source || "anonymous"),
+      },
+      app: {
+        environment: String(meta?.app?.environment || "local"),
+        canRestoreSampleData: meta?.app?.canRestoreSampleData !== false,
+        hostname: String(meta?.app?.hostname || window.location.hostname),
+      },
+    };
+  }
+
+  async function fetchSharedState() {
     const response = await window.fetch(STATE_API_URL, {
-      method: "PUT",
+      headers: {
+        accept: "application/json",
+      },
+    });
+    if (!response.ok) {
+      throw new Error(await readApiError(response, `Failed to load shared state (${response.status}).`));
+    }
+
+    const payload = await response.json();
+    applyRemoteMeta(payload.meta);
+    return normalizeRemoteState(payload);
+  }
+
+  async function mutateState(url, body) {
+    const actor = getEffectiveActor();
+    const response = await window.fetch(url, {
+      method: "POST",
       headers: {
         "content-type": "application/json",
         accept: "application/json",
       },
       body: JSON.stringify({
-        parts: state.parts,
-        products: state.products,
-        printers: state.printers,
-        printState: state.printState,
-        completedPrints: state.completedPrints,
+        ...body,
+        actor,
       }),
     });
 
@@ -2421,19 +2619,46 @@
       throw new Error(await readApiError(response, `Failed to save shared state (${response.status}).`));
     }
 
+    const payload = await response.json();
+    applyRemoteMeta(payload.state?.meta || payload.meta);
+    const nextState = normalizeRemoteState(payload.state || payload);
+    replaceStateInMemory(nextState);
     ui.backendUnavailable = false;
-    ui.lastSyncedState = clone({
-      parts: state.parts,
-      products: state.products,
-      printers: state.printers,
-      printState: state.printState,
-      completedPrints: state.completedPrints,
-    });
+    ui.lastSyncedState = clone(nextState);
+    return payload;
   }
 
-  async function overwriteState(nextState) {
-    replaceStateInMemory(nextState);
-    await persistState();
+  async function replaceSharedState(nextState) {
+    const response = await window.fetch(STATE_API_URL, {
+      method: "PUT",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json",
+      },
+      body: JSON.stringify(nextState),
+    });
+
+    if (!response.ok) {
+      throw new Error(await readApiError(response, `Failed to save shared state (${response.status}).`));
+    }
+
+    const payload = await response.json();
+    applyRemoteMeta(payload.meta);
+    const normalizedState = normalizeRemoteState(payload);
+    replaceStateInMemory(normalizedState);
+    ui.backendUnavailable = false;
+    ui.lastSyncedState = clone(normalizedState);
+    return normalizedState;
+  }
+
+  function applyRemoteMeta(meta) {
+    const normalizedMeta = normalizeRemoteMeta(meta);
+    ui.currentUser = normalizedMeta.auth;
+    ui.appMeta = normalizedMeta.app;
+  }
+
+  function getEffectiveActor() {
+    return normalizeActorName(ui.operatorName || ui.currentUser.email || "");
   }
 
   function replaceStateInMemory(nextState) {
@@ -2442,6 +2667,9 @@
     state.printers = nextState.printers;
     state.printState = nextState.printState;
     state.completedPrints = nextState.completedPrints;
+    state.partInventoryMovements = nextState.partInventoryMovements;
+    state.finishedInventoryMovements = nextState.finishedInventoryMovements;
+    state.printEvents = nextState.printEvents;
   }
 
   function handlePersistenceError(error) {
@@ -2501,6 +2729,46 @@
     };
   }
 
+  function normalizePartInventoryMovement(entry) {
+    return {
+      id: entry.id || generateId("part-move"),
+      partId: entry.partId || "",
+      deltaQty: parseInteger(entry.deltaQty) || 0,
+      reason: entry.reason || "",
+      referenceType: entry.referenceType || "",
+      referenceId: entry.referenceId || "",
+      note: entry.note || "",
+      actor: normalizeActorName(entry.actor),
+      createdAt: entry.createdAt || new Date().toISOString(),
+    };
+  }
+
+  function normalizeFinishedInventoryMovement(entry) {
+    return {
+      id: entry.id || generateId("finished-move"),
+      productId: entry.productId || "",
+      deltaQty: parseInteger(entry.deltaQty) || 0,
+      reason: entry.reason || "",
+      referenceType: entry.referenceType || "",
+      referenceId: entry.referenceId || "",
+      note: entry.note || "",
+      actor: normalizeActorName(entry.actor),
+      createdAt: entry.createdAt || new Date().toISOString(),
+    };
+  }
+
+  function normalizePrintEvent(entry) {
+    return {
+      id: entry.id || generateId("print-event"),
+      partId: entry.partId || "",
+      action: entry.action || "",
+      quantity: toNonNegativeInteger(entry.quantity),
+      note: entry.note || "",
+      actor: normalizeActorName(entry.actor),
+      createdAt: entry.createdAt || new Date().toISOString(),
+    };
+  }
+
   function migrateLegacyPrintJobs(printJobs) {
     const stateByPartId = new Map();
     const completedPrints = [];
@@ -2540,23 +2808,6 @@
     };
   }
 
-  function getOrCreatePrintStateEntry(partId) {
-    let entry = state.printState.find((candidate) => candidate.partId === partId);
-    if (entry) {
-      return entry;
-    }
-
-    entry = emptyPrintStateEntry(partId);
-    state.printState.push(entry);
-    return entry;
-  }
-
-  function cleanupPrintState() {
-    state.printState = state.printState
-      .map((entry) => normalizePrintStateEntry(entry))
-      .filter((entry) => entry.plannedQty > 0 || entry.inProgressQty > 0 || entry.failedQty > 0);
-  }
-
   function promptForQuantity(message, max) {
     const response = window.prompt(message, "1");
     if (response === null) {
@@ -2585,6 +2836,105 @@
       `;
     }
     return items.map(renderItem).join("");
+  }
+
+  function renderActivityCard(entry) {
+    return `
+      <article class="detail-card">
+        <div class="detail-card__head">
+          <div>
+            <h3>${escapeHtml(entry.title)}</h3>
+            <p class="sku">${escapeHtml(entry.subtitle)}</p>
+          </div>
+          <span class="badge ${entry.badgeClass}">${escapeHtml(entry.badgeLabel)}</span>
+        </div>
+        <p class="helper-text">${escapeHtml(entry.description)}</p>
+        ${entry.note ? `<p class="helper-text">${formatParagraph(entry.note)}</p>` : ""}
+        <p class="helper-text">${escapeHtml(formatActorLabel(entry.actor))} · ${escapeHtml(formatTimestamp(entry.timestamp))}</p>
+      </article>
+    `;
+  }
+
+  function renderMiniActivity(entry) {
+    return `
+      <div class="activity-item">
+        <div class="meta-row">
+          <span class="badge ${entry.badgeClass}">${escapeHtml(entry.badgeLabel)}</span>
+          <span class="activity-time">${escapeHtml(formatTimestamp(entry.timestamp))}</span>
+        </div>
+        <p class="activity-copy">${escapeHtml(entry.description)}</p>
+        <p class="helper-text">${escapeHtml(formatActorLabel(entry.actor))}</p>
+        ${entry.note ? `<p class="helper-text">${formatParagraph(entry.note)}</p>` : ""}
+      </div>
+    `;
+  }
+
+  function renderActivityToolbars(computed) {
+    const markup = buildActivityToolbarMarkup(computed);
+    if (dom.dashboardActivityToolbar) {
+      dom.dashboardActivityToolbar.innerHTML = markup;
+    }
+    if (dom.partsActivityToolbar) {
+      dom.partsActivityToolbar.innerHTML = markup;
+    }
+    if (dom.productsActivityToolbar) {
+      dom.productsActivityToolbar.innerHTML = markup;
+    }
+    if (dom.operatorName && dom.operatorName.value !== ui.operatorName) {
+      dom.operatorName.value = ui.operatorName;
+    }
+  }
+
+  function buildActivityToolbarMarkup(computed) {
+    const actorOptions = [
+      '<option value="all">All operators</option>',
+      ...computed.activityActors.map(
+        (option) =>
+          `<option value="${escapeHtml(option.value)}" ${ui.activityFilters.actor === option.value ? "selected" : ""}>${escapeHtml(option.label)}</option>`,
+      ),
+    ].join("");
+    const actionOptions = [
+      '<option value="all">All actions</option>',
+      ...computed.activityActions.map(
+        (option) =>
+          `<option value="${escapeHtml(option.value)}" ${ui.activityFilters.action === option.value ? "selected" : ""}>${escapeHtml(option.label)}</option>`,
+      ),
+    ].join("");
+
+    return `
+      <div class="activity-toolbar__controls">
+        <label class="field activity-filter-field">
+          <span>Scope</span>
+          <select data-activity-filter="scope">
+            <option value="all" ${ui.activityFilters.scope === "all" ? "selected" : ""}>All activity</option>
+            <option value="part" ${ui.activityFilters.scope === "part" ? "selected" : ""}>Part inventory</option>
+            <option value="product" ${ui.activityFilters.scope === "product" ? "selected" : ""}>Finished goods</option>
+            <option value="queue" ${ui.activityFilters.scope === "queue" ? "selected" : ""}>Queue events</option>
+          </select>
+        </label>
+        <label class="field activity-filter-field">
+          <span>Action</span>
+          <select data-activity-filter="action">
+            ${actionOptions}
+          </select>
+        </label>
+        <label class="field activity-filter-field">
+          <span>Operator</span>
+          <select data-activity-filter="actor">
+            ${actorOptions}
+          </select>
+        </label>
+        <label class="field activity-filter-field">
+          <span>Window</span>
+          <select data-activity-filter="window">
+            <option value="7" ${ui.activityFilters.window === "7" ? "selected" : ""}>Last 7 days</option>
+            <option value="30" ${ui.activityFilters.window === "30" ? "selected" : ""}>Last 30 days</option>
+            <option value="90" ${ui.activityFilters.window === "90" ? "selected" : ""}>Last 90 days</option>
+            <option value="all" ${ui.activityFilters.window === "all" ? "selected" : ""}>All time</option>
+          </select>
+        </label>
+      </div>
+    `;
   }
 
   function renderFileReference(fileRef) {
@@ -2622,6 +2972,315 @@
 
   function resolveAssetReference(assetRef) {
     return assetRef;
+  }
+
+  function buildPartActivityEntries(state, partsById) {
+    const completionMovementKeys = new Set(
+      state.partInventoryMovements
+        .filter((entry) => entry.reason === "print_completed")
+        .map((entry) => `${entry.partId}::${entry.deltaQty}::${entry.createdAt}`),
+    );
+
+    const movementEntries = state.partInventoryMovements.map((entry) => {
+      const part = partsById.get(entry.partId);
+      return {
+        id: entry.id,
+        entityId: entry.partId,
+        title: part ? part.name : "Missing part",
+        subtitle: "Part inventory",
+        scope: "part",
+        actionKey: entry.reason,
+        badgeLabel: formatSignedQuantity(entry.deltaQty),
+        badgeClass: entry.deltaQty >= 0 ? "badge--active" : "badge--inactive",
+        description: describePartMovement(entry.reason, part ? part.name : "Part"),
+        note: entry.note,
+        actor: entry.actor,
+        timestamp: entry.createdAt,
+      };
+    });
+
+    const queueEntries = state.printEvents
+      .filter((entry) => entry.action !== "complete")
+      .map((entry) => {
+        const part = partsById.get(entry.partId);
+        return {
+          id: entry.id,
+          entityId: entry.partId,
+          title: part ? part.name : "Missing part",
+          subtitle: "Queue event",
+          scope: "queue",
+          actionKey: entry.action,
+          badgeLabel: `${formatNumber(entry.quantity)} ${formatQueueActionLabel(entry.action)}`,
+          badgeClass: getQueueActivityBadgeClass(entry.action),
+          description: describePrintEvent(entry.action, part ? part.name : "Part"),
+          note: entry.note,
+          actor: entry.actor,
+          timestamp: entry.createdAt,
+        };
+      });
+
+    const legacyCompletionEntries = state.completedPrints
+      .filter((entry) => !completionMovementKeys.has(`${entry.partId}::${entry.quantity}::${entry.completedAt}`))
+      .map((entry) => {
+        const part = partsById.get(entry.partId);
+        return {
+          id: `legacy-${entry.id}`,
+          entityId: entry.partId,
+          title: part ? part.name : "Missing part",
+          subtitle: "Completed print",
+          scope: "part",
+          actionKey: "print_completed",
+          badgeLabel: formatSignedQuantity(entry.quantity),
+          badgeClass: "badge--active",
+          description: describePartMovement("print_completed", part ? part.name : "Part"),
+          note: "",
+          actor: "",
+          timestamp: entry.completedAt,
+        };
+      });
+
+    return [...movementEntries, ...queueEntries, ...legacyCompletionEntries].sort(
+      (left, right) => new Date(right.timestamp).getTime() - new Date(left.timestamp).getTime(),
+    );
+  }
+
+  function buildProductActivityEntries(state, productsById) {
+    return state.finishedInventoryMovements
+      .map((entry) => {
+        const product = productsById.get(entry.productId);
+        return {
+          id: entry.id,
+          entityId: entry.productId,
+          title: product ? product.name : "Missing product",
+          subtitle: "Finished goods",
+          scope: "product",
+          actionKey: entry.reason,
+          badgeLabel: formatSignedQuantity(entry.deltaQty),
+          badgeClass: entry.deltaQty >= 0 ? "badge--active" : "badge--inactive",
+          description: describeFinishedMovement(entry.reason, product ? product.name : "Product"),
+          note: entry.note,
+          actor: entry.actor,
+          timestamp: entry.createdAt,
+        };
+      })
+      .sort((left, right) => new Date(right.timestamp).getTime() - new Date(left.timestamp).getTime());
+  }
+
+  function filterActivityEntries(entries, filters) {
+    return entries.filter((entry) => {
+      if (filters.scope !== "all" && entry.scope !== filters.scope) {
+        return false;
+      }
+      if (filters.action !== "all" && entry.actionKey !== filters.action) {
+        return false;
+      }
+      if (filters.actor !== "all") {
+        const actorKey = entry.actor ? entry.actor : "__unknown__";
+        if (actorKey !== filters.actor) {
+          return false;
+        }
+      }
+      if (filters.window !== "all") {
+        const days = Number.parseInt(filters.window, 10);
+        if (Number.isFinite(days) && days > 0) {
+          const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
+          if (new Date(entry.timestamp).getTime() < cutoff) {
+            return false;
+          }
+        }
+      }
+      return true;
+    });
+  }
+
+  function buildActivityActorOptions(entries) {
+    const seen = new Set();
+    const options = [];
+
+    entries.forEach((entry) => {
+      const value = entry.actor ? entry.actor : "__unknown__";
+      if (seen.has(value)) {
+        return;
+      }
+      seen.add(value);
+      options.push({
+        value,
+        label: formatActorLabel(entry.actor),
+      });
+    });
+
+    return options.sort((left, right) => left.label.localeCompare(right.label));
+  }
+
+  function buildActivityActionOptions(entries) {
+    const seen = new Set();
+    const options = [];
+
+    entries.forEach((entry) => {
+      if (!entry.actionKey || seen.has(entry.actionKey)) {
+        return;
+      }
+      seen.add(entry.actionKey);
+      options.push({
+        value: entry.actionKey,
+        label: formatActionOptionLabel(entry.actionKey),
+      });
+    });
+
+    return options.sort((left, right) => left.label.localeCompare(right.label));
+  }
+
+  function formatSignedQuantity(value) {
+    const numericValue = Number(value) || 0;
+    return `${numericValue > 0 ? "+" : ""}${formatNumber(numericValue)}`;
+  }
+
+  function formatQueueActionLabel(action) {
+    if (action === "start") {
+      return "started";
+    }
+    if (action === "fail") {
+      return "failed";
+    }
+    if (action === "retry") {
+      return "retried";
+    }
+    if (action === "plan") {
+      return "planned";
+    }
+    return capitalizeWords(action);
+  }
+
+  function getQueueActivityBadgeClass(action) {
+    if (action === "start") {
+      return "status--in_progress";
+    }
+    if (action === "fail") {
+      return "status--failed";
+    }
+    return "status--planned";
+  }
+
+  function describePartMovement(reason, partName) {
+    if (reason === "manual_add") {
+      return `Added completed ${partName} stock.`;
+    }
+    if (reason === "manual_adjustment") {
+      return `Adjusted ${partName} inventory manually.`;
+    }
+    if (reason === "manual_edit_balance") {
+      return `Changed ${partName} inventory from the part editor.`;
+    }
+    if (reason === "assembly_consumed") {
+      return `${partName} inventory was consumed by assembly.`;
+    }
+    if (reason === "print_completed") {
+      return `${partName} print finished and moved into inventory.`;
+    }
+    if (reason === "packed_direct_product") {
+      return `${partName} stock was packed directly as sellable product.`;
+    }
+    return `${partName} inventory changed.`;
+  }
+
+  function describeFinishedMovement(reason, productName) {
+    if (reason === "assembled") {
+      return `${productName} was assembled into finished stock.`;
+    }
+    if (reason === "packed") {
+      return `${productName} was packed from finished stock.`;
+    }
+    if (reason === "manual_adjustment") {
+      return `${productName} finished stock was adjusted manually.`;
+    }
+    if (reason === "manual_edit_balance") {
+      return `${productName} finished stock changed from the product editor.`;
+    }
+    return `${productName} finished stock changed.`;
+  }
+
+  function describePrintEvent(action, partName) {
+    if (action === "plan") {
+      return `${partName} quantity was added to the queue plan.`;
+    }
+    if (action === "start") {
+      return `${partName} quantity moved into active printing.`;
+    }
+    if (action === "fail") {
+      return `${partName} quantity was marked as failed.`;
+    }
+    if (action === "retry") {
+      return `${partName} failed quantity moved back to planned.`;
+    }
+    return `${partName} queue changed.`;
+  }
+
+  function formatActorLabel(actor) {
+    return actor ? `By ${actor}` : "Operator unknown";
+  }
+
+  function formatActionOptionLabel(actionKey) {
+    if (actionKey === "manual_add") {
+      return "Manual add";
+    }
+    if (actionKey === "manual_adjustment") {
+      return "Manual adjustment";
+    }
+    if (actionKey === "manual_edit_balance") {
+      return "Editor balance change";
+    }
+    if (actionKey === "assembly_consumed") {
+      return "Assembly consumed parts";
+    }
+    if (actionKey === "print_completed") {
+      return "Print completed";
+    }
+    if (actionKey === "packed_direct_product") {
+      return "Packed direct product";
+    }
+    if (actionKey === "assembled") {
+      return "Assembled finished goods";
+    }
+    if (actionKey === "packed") {
+      return "Packed finished goods";
+    }
+    if (actionKey === "plan") {
+      return "Queue planned";
+    }
+    if (actionKey === "start") {
+      return "Queue started";
+    }
+    if (actionKey === "fail") {
+      return "Queue failed";
+    }
+    if (actionKey === "retry") {
+      return "Queue retried";
+    }
+    return capitalizeWords(actionKey);
+  }
+
+  function isActivityFilterActive() {
+    return Object.entries(DEFAULT_ACTIVITY_FILTERS).some(([key, value]) => ui.activityFilters[key] !== value);
+  }
+
+  function readSessionOperatorName() {
+    try {
+      return normalizeActorName(window.sessionStorage.getItem(SESSION_OPERATOR_KEY) || "");
+    } catch (error) {
+      return "";
+    }
+  }
+
+  function writeSessionOperatorName(value) {
+    try {
+      if (value) {
+        window.sessionStorage.setItem(SESSION_OPERATOR_KEY, value);
+      } else {
+        window.sessionStorage.removeItem(SESSION_OPERATOR_KEY);
+      }
+    } catch (error) {
+      // Ignore session storage errors.
+    }
   }
 
   function getSetupKey(color, material) {
@@ -2736,5 +3395,9 @@
       return `${prefix}-${window.crypto.randomUUID()}`;
     }
     return `${prefix}-${Math.random().toString(36).slice(2, 10)}`;
+  }
+
+  function normalizeActorName(value) {
+    return String(value || "").trim().slice(0, 80);
   }
 })();

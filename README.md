@@ -35,6 +35,8 @@ Run the schema locally:
 npm run db:migrate:local
 ```
 
+This applies both the base tables and the inventory-ledger/event tables. Re-run it after pulling schema changes; the SQL uses `IF NOT EXISTS`.
+
 Run the schema remotely:
 
 ```bash
@@ -77,6 +79,11 @@ Then open the local URL Vite prints, which is typically `http://localhost:5173`.
 ## Notes
 
 - Shared app state is stored in Cloudflare D1 through [functions/api/state.js](/Users/olafwojtas/Documents/twirl.studio/print-manager/functions/api/state.js).
+- Inventory, finished-goods, and queue actions now write movement/event records in D1 so stock changes are transactional instead of whole-state rewrites.
+- The operator name field is session-scoped in the browser and is attached to new activity records for attribution and filtering.
+- If Cloudflare Access is enabled in front of the app, the backend reads `cf-access-authenticated-user-email` and uses that identity as the default actor when the operator override is blank.
+- `Restore sample data` is shown automatically in local development. In deployed environments it is hidden unless `ALLOW_SAMPLE_RESET=true` is configured.
+- `APP_ENV` can be set to label non-local deployments more explicitly; otherwise the app treats deployed environments as `production`.
 - Local `npm run dev` does not include Pages Functions or D1. Use `npm run build` plus `npm run dev:cf` for the real full-stack workflow.
 - `Restore sample data` resets the app to a seeded dataset for testing the workflow.
 - Completing a print job automatically adds that quantity into part inventory.
