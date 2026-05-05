@@ -1572,6 +1572,49 @@ function normalizeActor(value) {
   return String(value || "").trim().slice(0, 80);
 }
 
+function decodeBase64Url(value) {
+  const normalized = String(value || "")
+    .replace(/-/g, "+")
+    .replace(/_/g, "/");
+  const padding = normalized.length % 4;
+  const padded = padding ? normalized + "=".repeat(4 - padding) : normalized;
+  return atob(padded);
+}
+
+function extractEmailFromAccessJwt(token) {
+  const raw = String(token || "").trim();
+  if (!raw) {
+    return "";
+  }
+
+  const parts = raw.split(".");
+  if (parts.length < 2) {
+    return "";
+  }
+
+  try {
+    const payload = JSON.parse(decodeBase64Url(parts[1]));
+    return normalizeActor(payload?.email || payload?.sub || "");
+  } catch {
+    return "";
+  }
+}
+
+function readCookie(headers, name) {
+  const raw = String(headers.get("cookie") || "");
+  if (!raw) {
+    return "";
+  }
+
+  const prefix = `${name}=`;
+  const entry = raw
+    .split(";")
+    .map((segment) => segment.trim())
+    .find((segment) => segment.startsWith(prefix));
+
+  return entry ? decodeURIComponent(entry.slice(prefix.length)) : "";
+}
+
 async function ensureColumn(db, tableName, columnName, alterSql) {
   const result = await db.prepare(`PRAGMA table_info(${tableName})`).all();
   const hasColumn = (result.results || []).some((row) => row.name === columnName);
@@ -1581,7 +1624,11 @@ async function ensureColumn(db, tableName, columnName, alterSql) {
 }
 
 function getAuthenticatedUser(request) {
-  const email = normalizeActor(request.headers.get("cf-access-authenticated-user-email"));
+  const email =
+    extractEmailFromAccessJwt(request.headers.get("cf-access-jwt-assertion")) ||
+    normalizeActor(request.headers.get("cf-access-authenticated-user-email")) ||
+    extractEmailFromAccessJwt(readCookie(request.headers, "CF_Authorization"));
+
   return {
     email,
   };
