@@ -272,6 +272,7 @@
     printerFormDraft: blankPrinterDraft(),
     operatorName: readSessionOperatorName(),
     activityFilters: { ...DEFAULT_ACTIVITY_FILTERS },
+    selectedPartId: null,
     currentUser: createEmptyAuthMeta(),
     appMeta: createEmptyAppMeta(),
     backendUnavailable: false,
@@ -321,6 +322,8 @@
       dashboardActivityToolbar: document.querySelector("#dashboard-activity-toolbar"),
       partsList: document.querySelector("#parts-list"),
       partsCount: document.querySelector("#parts-count"),
+      partsTitle: document.querySelector("#parts-title"),
+      partDetail: document.querySelector("#part-detail"),
       partsActivityToolbar: document.querySelector("#parts-activity-toolbar"),
       productsList: document.querySelector("#products-list"),
       productsCount: document.querySelector("#products-count"),
@@ -437,6 +440,14 @@
         case "cancel-part-edit":
           ui.partFormDraft = blankPartDraft();
           renderPartForm();
+          break;
+        case "view-part":
+          ui.selectedPartId = id;
+          renderPartsList(ui.lastComputed || computeState());
+          break;
+        case "close-part-detail":
+          ui.selectedPartId = null;
+          renderPartsList(ui.lastComputed || computeState());
           break;
         case "cancel-product-edit":
           ui.productFormDraft = blankProductDraft();
@@ -849,100 +860,58 @@
   }
 
   function renderPartsList(computed) {
+    const selectedPart = computed.partsById.get(ui.selectedPartId);
+    if (ui.selectedPartId && !selectedPart) {
+      ui.selectedPartId = null;
+    }
+
+    if (selectedPart) {
+      dom.partsTitle.textContent = "Part details";
+      dom.partsCount.textContent = "";
+      dom.partsList.hidden = true;
+      dom.partsActivityToolbar.hidden = false;
+      dom.partDetail.hidden = false;
+      dom.partDetail.innerHTML = renderPartDetail(selectedPart, computed);
+      return;
+    }
+
+    dom.partsTitle.textContent = "Printed parts on hand";
     dom.partsCount.textContent = `${computed.parts.length} tracked`;
+    dom.partsList.hidden = false;
+    dom.partsActivityToolbar.hidden = true;
+    dom.partDetail.hidden = true;
+    dom.partDetail.innerHTML = "";
 
     dom.partsList.innerHTML = renderList(
       computed.parts,
       (part) => {
-        const queueRow = computed.queueByPartId.get(part.id);
-        const openJobs = queueRow ? queueRow.plannedQty + queueRow.inProgressQty : 0;
-        const usedInProducts = computed.productsUsingPart.get(part.id) || [];
-        const partHistory = computed.partHistoryById.get(part.id) || [];
-        const hasAnyPartHistory = (computed.partHistoryTotalById.get(part.id) || 0) > 0;
+        const currentDemand = computed.currentDemandByPartId.get(part.id) || 0;
+        const demandGap = computed.currentDemandGapByPartId.get(part.id) || 0;
         return `
-          <article class="entity-card">
-            <div class="${part.imageRef ? "card-hero" : ""}">
-              ${renderEntityImage(part.imageRef, part.name)}
-              <div>
-                <div class="entity-card__head">
-                  <div class="entity-card__title">
-                    <h3>${escapeHtml(part.name)}</h3>
-                    <p class="sku">${escapeHtml(part.sku || "No SKU")}</p>
-                  </div>
-                  <span class="badge ${part.inventoryQty < part.minStock ? "badge--inactive" : "badge--active"}">
-                    ${formatNumber(part.inventoryQty)} in stock
-                  </span>
+          <article class="entity-card part-summary-card">
+            <button
+              class="part-summary-card__open"
+              data-action="view-part"
+              data-id="${escapeHtml(part.id)}"
+              type="button"
+              aria-label="View details for ${escapeHtml(part.name)}"
+            >
+              <h3>${escapeHtml(part.name)}</h3>
+              <div class="part-summary-card__stats">
+                <div class="part-summary-stat">
+                  <span class="part-summary-stat__label">Inventory</span>
+                  <strong class="part-summary-stat__value">${formatNumber(part.inventoryQty)}</strong>
+                </div>
+                <div class="part-summary-stat">
+                  <span class="part-summary-stat__label">Current demand</span>
+                  <strong class="part-summary-stat__value">${formatNumber(currentDemand)}</strong>
+                </div>
+                <div class="part-summary-stat part-summary-stat--gap">
+                  <span class="part-summary-stat__label">Gap to current demand</span>
+                  <strong class="part-summary-stat__value">${formatNumber(demandGap)}</strong>
                 </div>
               </div>
-            </div>
-
-            <div class="chips">
-              <span class="chip">${escapeHtml(part.color)}</span>
-              <span class="chip">${escapeHtml(part.material)}</span>
-              <span class="chip">Min ${formatNumber(part.minStock)}</span>
-              <span class="chip">${escapeHtml(formatDurationMinutes(part.printTimeMinutes))} each</span>
-              <span class="chip">Planned/running ${formatNumber(openJobs)}</span>
-            </div>
-
-            <div class="stats-grid">
-              <div class="stat">
-                <span class="stat__label">Inventory</span>
-                <div class="stat__value">${formatNumber(part.inventoryQty)}</div>
-              </div>
-              <div class="stat">
-                <span class="stat__label">Queue need</span>
-                <div class="stat__value">${formatNumber(computed.queueNeededByPartId.get(part.id) || 0)}</div>
-              </div>
-              <div class="stat">
-                <span class="stat__label">Print time</span>
-                <div class="stat__value">${escapeHtml(formatDurationMinutes(part.printTimeMinutes))}</div>
-              </div>
-            </div>
-
-            ${
-              usedInProducts.length
-                ? `
-                  <div class="bom-list">
-                    ${usedInProducts
-                      .map(
-                        (product) => `
-                          <div class="bom-item">
-                            <strong>${escapeHtml(product.name)}</strong>
-                            Used in ${formatNumber(product.quantity)} per finished unit
-                          </div>
-                        `,
-                      )
-                      .join("")}
-                  </div>
-                `
-                : '<p class="helper-text">Not currently assigned to any product BOM.</p>'
-            }
-
-            ${
-              part.fileRef
-                ? `
-                  <p class="helper-text">
-                    File: ${renderFileReference(part.fileRef)}
-                  </p>
-                `
-                : ""
-            }
-
-            ${part.notes ? `<p class="helper-text">${formatParagraph(part.notes)}</p>` : ""}
-
-            ${
-              partHistory.length
-                ? `
-                  <div class="activity-stack">
-                    ${partHistory.map((entry) => renderMiniActivity(entry)).join("")}
-                  </div>
-                `
-                : `<p class="helper-text">${
-                    computed.isActivityFilterActive && hasAnyPartHistory
-                      ? "No part activity matches the current filters."
-                      : "No part activity has been recorded yet."
-                  }</p>`
-            }
+            </button>
 
             <div class="card-actions">
               <button class="button button--small" data-action="edit-part" data-id="${escapeHtml(part.id)}" type="button">
@@ -967,6 +936,106 @@
       "No parts have been created yet.",
       "Start by defining the printed parts your farm produces.",
     );
+  }
+
+  function renderPartDetail(part, computed) {
+    const queueRow = computed.queueByPartId.get(part.id);
+    const openJobs = queueRow ? queueRow.plannedQty + queueRow.inProgressQty : 0;
+    const currentDemand = computed.currentDemandByPartId.get(part.id) || 0;
+    const demandGap = computed.currentDemandGapByPartId.get(part.id) || 0;
+    const usedInProducts = computed.productsUsingPart.get(part.id) || [];
+    const partHistory = computed.partHistoryById.get(part.id) || [];
+    const hasAnyPartHistory = (computed.partHistoryTotalById.get(part.id) || 0) > 0;
+
+    return `
+      <article class="entity-card part-detail-view">
+        <div>
+          <button class="button button--small button--ghost" data-action="close-part-detail" type="button">
+            ← Back to all parts
+          </button>
+        </div>
+
+        <div class="${part.imageRef ? "card-hero" : ""}">
+          ${renderEntityImage(part.imageRef, part.name)}
+          <div class="entity-card__head">
+            <div class="entity-card__title">
+              <h3>${escapeHtml(part.name)}</h3>
+              <p class="sku">${escapeHtml(part.sku || "No SKU")}</p>
+            </div>
+            <span class="badge ${part.inventoryQty < part.minStock ? "badge--inactive" : "badge--active"}">
+              ${formatNumber(part.inventoryQty)} in stock
+            </span>
+          </div>
+        </div>
+
+        <div class="chips">
+          <span class="chip">${escapeHtml(part.color)}</span>
+          <span class="chip">${escapeHtml(part.material)}</span>
+          <span class="chip">Min ${formatNumber(part.minStock)}</span>
+          <span class="chip">${escapeHtml(formatDurationMinutes(part.printTimeMinutes))} each</span>
+          <span class="chip">Planned/running ${formatNumber(openJobs)}</span>
+        </div>
+
+        <div class="stats-grid">
+          <div class="stat">
+            <span class="stat__label">Inventory</span>
+            <div class="stat__value">${formatNumber(part.inventoryQty)}</div>
+          </div>
+          <div class="stat">
+            <span class="stat__label">Current demand</span>
+            <div class="stat__value">${formatNumber(currentDemand)}</div>
+          </div>
+          <div class="stat stat--gap">
+            <span class="stat__label">Gap to current demand</span>
+            <div class="stat__value">${formatNumber(demandGap)}</div>
+          </div>
+          <div class="stat">
+            <span class="stat__label">Print time</span>
+            <div class="stat__value">${escapeHtml(formatDurationMinutes(part.printTimeMinutes))}</div>
+          </div>
+        </div>
+
+        ${
+          usedInProducts.length
+            ? `
+              <div class="bom-list">
+                ${usedInProducts
+                  .map(
+                    (product) => `
+                      <div class="bom-item">
+                        <strong>${escapeHtml(product.name)}</strong>
+                        Used in ${formatNumber(product.quantity)} per finished unit
+                      </div>
+                    `,
+                  )
+                  .join("")}
+              </div>
+            `
+            : '<p class="helper-text">Not currently assigned to any product BOM.</p>'
+        }
+
+        ${part.fileRef ? `<p class="helper-text">File: ${renderFileReference(part.fileRef)}</p>` : ""}
+        ${part.notes ? `<p class="helper-text">${formatParagraph(part.notes)}</p>` : ""}
+
+        ${
+          partHistory.length
+            ? `<div class="activity-stack">${partHistory.map((entry) => renderMiniActivity(entry)).join("")}</div>`
+            : `<p class="helper-text">${
+                computed.isActivityFilterActive && hasAnyPartHistory
+                  ? "No part activity matches the current filters."
+                  : "No part activity has been recorded yet."
+              }</p>`
+        }
+
+        <div class="card-actions">
+          <button class="button button--small" data-action="edit-part" data-id="${escapeHtml(part.id)}" type="button">Edit</button>
+          <button class="button button--small button--secondary" data-action="add-part-stock" data-id="${escapeHtml(part.id)}" type="button">Add stock</button>
+          <button class="button button--small button--ghost" data-action="adjust-part-stock" data-id="${escapeHtml(part.id)}" type="button">Adjust</button>
+          <button class="button button--small button--ghost" data-action="queue-part" data-id="${escapeHtml(part.id)}" type="button">View queue</button>
+          <button class="button button--small button--danger" data-action="delete-part" data-id="${escapeHtml(part.id)}" type="button">Delete</button>
+        </div>
+      </article>
+    `;
   }
 
   function renderProductForm() {
@@ -1642,6 +1711,9 @@
     }
 
     await mutateState(API_ENDPOINTS.partsDelete, { id });
+    if (ui.selectedPartId === id) {
+      ui.selectedPartId = null;
+    }
     if (ui.partFormDraft.id === id) {
       ui.partFormDraft = blankPartDraft();
     }
@@ -2259,6 +2331,10 @@
       suggestedJobs,
       productionQueue,
       queueByPartId,
+      currentDemandByPartId: new Map(parts.map((part) => [part.id, Math.max(demandByPartId.get(part.id) || 0, 0)])),
+      currentDemandGapByPartId: new Map(
+        parts.map((part) => [part.id, Math.max((demandByPartId.get(part.id) || 0) - part.inventoryQty, 0)]),
+      ),
       queueNeededByPartId: new Map(productionQueue.map((row) => [row.partId, row.shortageQty])),
       suggestedQtyByPartId: new Map(productionQueue.map((row) => [row.partId, row.remainingQty])),
       productsUsingPart,
