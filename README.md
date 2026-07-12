@@ -9,6 +9,7 @@ Cloudflare Pages app for tracking:
 - low-stock parts
 - suggested next print jobs
 - print queue status
+- manual sales orders and order-driven demand
 - active printer setups and queue parallel-time estimates
 
 ## Run
@@ -35,7 +36,7 @@ Run the schema locally:
 npm run db:migrate:local
 ```
 
-This applies both the base tables and the inventory-ledger/event tables. Re-run it after pulling schema changes; the SQL uses `IF NOT EXISTS`.
+This applies the base, inventory-ledger, and sales-order tables. Re-run it after pulling schema changes; the SQL uses `IF NOT EXISTS`.
 
 Run the schema remotely:
 
@@ -88,4 +89,5 @@ Then open the local URL Vite prints, which is typically `http://localhost:5173`.
 - `Restore sample data` resets the app to a seeded dataset for testing the workflow.
 - Completing a print job automatically adds that quantity into part inventory.
 - Assembling a product automatically deducts required parts and increases finished stock.
+- Open sales orders add demand to the derived print queue; packing an order deducts the correct finished or direct-part stock and records the actor.
 - Queue timing is estimated from active printers whose loaded color and material match the required queue rows.

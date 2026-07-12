@@ -178,6 +178,7 @@ h3 {
 }
 
 .summary-grid,
+.sales-summary-grid,
 .dashboard-grid,
 .card-grid,
 .split-layout {
@@ -189,6 +190,39 @@ h3 {
   position: relative;
   z-index: 1;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+.sales-summary-grid {
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  margin-bottom: 18px;
+}
+
+.sales-history-panel {
+  margin-top: 18px;
+}
+
+.order-lines {
+  display: grid;
+  gap: 8px;
+}
+
+.order-line {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: center;
+  padding: 10px 12px;
+  border-radius: 14px;
+  background: rgba(255, 247, 239, 0.82);
+}
+
+.order-line > div {
+  display: grid;
+  gap: 3px;
+}
+
+.order-item-row {
+  grid-template-columns: minmax(0, 1fr) 92px auto;
 }
 
 .summary-card {

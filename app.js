@@ -1,3 +1,5 @@
+import { buildDemandModel } from "./demand-model.js";
+
 (() => {
   const STATE_API_URL = "/api/state";
   const API_ENDPOINTS = {
@@ -11,6 +13,8 @@
     printersDelete: "/api/printers-delete",
     printerActions: "/api/printer-actions",
     queueActions: "/api/queue-actions",
+    salesOrders: "/api/sales-orders",
+    salesOrderActions: "/api/sales-order-actions",
   };
   const SESSION_OPERATOR_KEY = "print-manager.operator-name";
   const DEFAULT_ACTIVITY_FILTERS = {
@@ -263,13 +267,16 @@
     partInventoryMovements: [],
     finishedInventoryMovements: [],
     printEvents: [],
+    salesOrders: [],
+    salesOrderEvents: [],
   };
 
   const ui = {
-    activeTab: "dashboard",
+    activeTab: "sales",
     partFormDraft: blankPartDraft(),
     productFormDraft: blankProductDraft(),
     printerFormDraft: blankPrinterDraft(),
+    salesOrderDraft: blankSalesOrderDraft(),
     operatorName: readSessionOperatorName(),
     activityFilters: { ...DEFAULT_ACTIVITY_FILTERS },
     selectedPartId: null,
@@ -312,6 +319,12 @@
       operatorName: document.querySelector("#operator-name"),
       operatorLabel: document.querySelector("#operator-label"),
       signedInUser: document.querySelector("#signed-in-user"),
+      salesSummary: document.querySelector("#sales-summary"),
+      salesOrderForm: document.querySelector("#sales-order-form"),
+      salesOrderItems: document.querySelector("#sales-order-items"),
+      openOrdersCount: document.querySelector("#open-orders-count"),
+      openOrdersList: document.querySelector("#open-orders-list"),
+      salesOrderHistory: document.querySelector("#sales-order-history"),
       readyProducts: document.querySelector("#ready-products"),
       blockedProducts: document.querySelector("#blocked-products"),
       lowStockParts: document.querySelector("#low-stock-parts"),
@@ -343,6 +356,7 @@
       requirementsCopy: document.querySelector("#product-requirements-section .subhead__copy"),
       restoreSampleData: document.querySelector("#restore-sample-data"),
       views: {
+        sales: document.querySelector("#sales-view"),
         dashboard: document.querySelector("#dashboard-view"),
         parts: document.querySelector("#parts-view"),
         products: document.querySelector("#products-view"),
@@ -384,6 +398,14 @@
       ui.printerFormDraft = readPrinterForm();
     });
     dom.printerForm.addEventListener("submit", handlePrinterSubmit);
+
+    dom.salesOrderForm.addEventListener("input", () => {
+      ui.salesOrderDraft = readSalesOrderForm();
+    });
+    dom.salesOrderForm.addEventListener("change", () => {
+      ui.salesOrderDraft = readSalesOrderForm();
+    });
+    dom.salesOrderForm.addEventListener("submit", handleSalesOrderSubmit);
 
     if (dom.operatorName) {
       dom.operatorName.value = ui.operatorName;
@@ -456,6 +478,32 @@
         case "cancel-printer-edit":
           ui.printerFormDraft = blankPrinterDraft();
           renderPrinterForm();
+          break;
+        case "cancel-order-edit":
+          ui.salesOrderDraft = blankSalesOrderDraft();
+          renderSalesOrderForm();
+          break;
+        case "add-order-item":
+          ui.salesOrderDraft = readSalesOrderForm();
+          ui.salesOrderDraft.items.push({ productId: "", quantity: 1 });
+          renderSalesOrderForm();
+          break;
+        case "remove-order-item":
+          ui.salesOrderDraft = readSalesOrderForm();
+          ui.salesOrderDraft.items.splice(Number(index), 1);
+          if (!ui.salesOrderDraft.items.length) {
+            ui.salesOrderDraft.items.push({ productId: "", quantity: 1 });
+          }
+          renderSalesOrderForm();
+          break;
+        case "edit-sales-order":
+          startSalesOrderEdit(id);
+          break;
+        case "pack-sales-order":
+          await packSalesOrder(id);
+          break;
+        case "cancel-sales-order":
+          await cancelSalesOrder(id);
           break;
         case "edit-part":
           startPartEdit(id);
@@ -538,6 +586,8 @@
     renderTabs();
     renderHeader();
     renderSummaryCards(computed);
+    renderSales(computed);
+    renderSalesOrderForm();
     renderDashboard(computed);
     renderPartForm();
     renderPartsList(computed);
@@ -585,6 +635,122 @@
     }
   }
 
+  function renderSales(computed) {
+    dom.salesSummary.innerHTML = [
+      { label: "Open orders", value: computed.openOrderSummaries.length, detail: "Awaiting fulfillment" },
+      { label: "Current demand", value: computed.totalOpenSalesUnits, detail: "Unfulfilled product units" },
+      { label: "Ready to pack", value: computed.readyOrderCount, detail: "After reserving stock for older orders" },
+      { label: "Blocked orders", value: computed.blockedOrderCount, detail: "Need assembly or printing" },
+    ]
+      .map(
+        (metric) => `
+          <article class="summary-card">
+            <p class="metric__label">${escapeHtml(metric.label)}</p>
+            <p class="metric__value">${formatNumber(metric.value)}</p>
+            <p class="metric__detail">${escapeHtml(metric.detail)}</p>
+          </article>
+        `,
+      )
+      .join("");
+
+    dom.openOrdersCount.textContent = `${computed.openOrderSummaries.length} open`;
+    dom.openOrdersList.innerHTML = renderList(
+      computed.openOrderSummaries,
+      (order) => renderSalesOrderCard(order, true),
+      "There are no open orders.",
+      "Add a manual order to drive product demand and the print queue.",
+    );
+    dom.salesOrderHistory.innerHTML = renderList(
+      computed.closedOrderSummaries,
+      (order) => renderSalesOrderCard(order, false),
+      "No orders have been packed or cancelled yet.",
+      "Completed fulfillment history will remain available here.",
+    );
+  }
+
+  function renderSalesOrderCard(order, isOpen) {
+    const statusClass = order.status === "packed" ? "badge--active" : order.status === "cancelled" ? "badge--inactive" : order.ready ? "badge--active" : "badge--inactive";
+    const statusLabel = order.status === "open" ? (order.ready ? "Ready to pack" : "Waiting for stock") : capitalizeWords(order.status);
+    return `
+      <article class="detail-card sales-order-card">
+        <div class="detail-card__head">
+          <div>
+            <h3>Order ${escapeHtml(order.orderNumber)}</h3>
+            <p class="sku">${escapeHtml(formatOrderDate(order.orderDate))} · ${escapeHtml(capitalizeWords(order.source))}</p>
+          </div>
+          <span class="badge ${statusClass}">${escapeHtml(statusLabel)}</span>
+        </div>
+        <div class="order-lines">
+          ${order.items
+            .map(
+              (item) => `
+                <div class="order-line">
+                  <div>
+                    <strong>${escapeHtml(item.productName || "Missing product")}</strong>
+                    <span class="sku">${escapeHtml(item.productSku || "No SKU")}</span>
+                  </div>
+                  <strong>${formatNumber(item.quantity)}</strong>
+                </div>
+              `,
+            )
+            .join("")}
+        </div>
+        ${
+          isOpen && order.shortages.length
+            ? `<div class="missing-list">${order.shortages
+                .map(
+                  (shortage) => `<div class="missing-item"><strong>${escapeHtml(shortage.productName)}</strong>Short ${formatNumber(shortage.shortageQty)} ${escapeHtml(shortage.stockLabel)}</div>`,
+                )
+                .join("")}</div>`
+            : ""
+        }
+        ${
+          isOpen
+            ? `<div class="card-actions">
+                <button class="button button--small button--secondary" data-action="pack-sales-order" data-id="${escapeHtml(order.id)}" type="button" ${order.ready ? "" : "disabled"}>Pack order</button>
+                <button class="button button--small button--ghost" data-action="edit-sales-order" data-id="${escapeHtml(order.id)}" type="button">Edit</button>
+                <button class="button button--small button--danger" data-action="cancel-sales-order" data-id="${escapeHtml(order.id)}" type="button">Cancel</button>
+              </div>`
+            : `<p class="helper-text">${escapeHtml(order.status === "packed" ? `Packed ${formatTimestamp(order.packedAt)} by ${order.packedBy || "unknown operator"}.` : `Cancelled ${formatTimestamp(order.cancelledAt)} by ${order.cancelledBy || "unknown operator"}.`)}</p>`
+        }
+      </article>
+    `;
+  }
+
+  function renderSalesOrderForm() {
+    const draft = ui.salesOrderDraft;
+    setInputValue(dom.salesOrderForm, "id", draft.id);
+    setInputValue(dom.salesOrderForm, "orderNumber", draft.orderNumber);
+    setInputValue(dom.salesOrderForm, "orderDate", draft.orderDate);
+    const selectableProducts = state.products.filter((product) => product.active || draft.items.some((item) => item.productId === product.id));
+    dom.salesOrderItems.innerHTML = draft.items
+      .map(
+        (item, index) => `
+          <div class="requirement-row order-item-row">
+            <label class="field">
+              <span>Product</span>
+              <select data-order-item="productId" required>
+                <option value="">Select product</option>
+                ${selectableProducts
+                  .map(
+                    (product) => `<option value="${escapeHtml(product.id)}" ${product.id === item.productId ? "selected" : ""}>${escapeHtml(product.name)}${product.sku ? ` · ${escapeHtml(product.sku)}` : ""}</option>`,
+                  )
+                  .join("")}
+              </select>
+            </label>
+            <label class="field">
+              <span>Quantity</span>
+              <input data-order-item="quantity" type="number" min="1" step="1" value="${escapeHtml(String(item.quantity || 1))}" required />
+            </label>
+            <button class="button button--small button--ghost" data-action="remove-order-item" data-index="${index}" type="button">Remove</button>
+          </div>
+        `,
+      )
+      .join("");
+    dom.salesOrderForm.querySelector('button[type="submit"]').textContent = draft.id ? "Save order" : "Add order";
+    dom.salesOrderForm.querySelector('[data-action="cancel-order-edit"]').hidden = !draft.id;
+  }
+
   function renderSummaryCards(computed) {
     dom.summaryCards.innerHTML = [
       {
@@ -616,7 +782,7 @@
         label: "Parallel queue time",
         valueLabel: computed.totalQueueParallelTimeLabel,
         detail: computed.unassignedQueueRowsCount
-          ? `${formatNumber(computed.unassignedQueueRowsCount)} queue row${computed.unassignedQueueRowsCount === 1 ? "" : "s"} have no active printer`
+          ? `${formatNumber(computed.unassignedQueueRowsCount)} queue row${computed.unassignedQueueRowsCount === 1 ? " has" : "s have"} no active printer`
           : "Estimated from current active color and material setups",
       },
     ]
@@ -671,7 +837,7 @@
                 <span class="chip">${product.requiresAssembly ? "Assembly product" : "Single-part product"}</span>
                 <span class="chip">${escapeHtml(formatDurationMinutes(product.printTimeMinutes))} per unit</span>
                 <button class="button button--small button--secondary" data-action="pack-product" data-id="${escapeHtml(product.id)}" type="button">
-                  Pack
+                  Pack without order
                 </button>
               </div>
             </div>
@@ -790,14 +956,14 @@
         </article>
       `,
       "No additional product-driven print demand is currently calculated.",
-      "The queue is generated automatically from target-stock gaps on active products.",
+      "The queue is generated automatically from open orders and target-stock replenishment.",
     );
 
     dom.queueSnapshot.innerHTML = renderList(
       computed.productionQueue,
       (row) => renderQueueCard(row, true),
       "Nothing needs printing right now.",
-      "Once active products fall below target stock, the queue will appear automatically.",
+      "Open orders and target-stock gaps populate the queue automatically.",
     );
 
     dom.completedPrints.innerHTML = renderList(
@@ -1188,6 +1354,10 @@
               <span class="stat__label">Gap to target</span>
               <div class="stat__value">${formatNumber(product.targetGap)}</div>
             </div>
+            <div class="stat stat--gap">
+              <span class="stat__label">Current sales demand</span>
+              <div class="stat__value">${formatNumber(product.currentSalesDemand)}</div>
+            </div>
             <div class="stat">
               <span class="stat__label">Print time / unit</span>
               <div class="stat__value">${escapeHtml(formatDurationMinutes(product.printTimeMinutes))}</div>
@@ -1258,7 +1428,7 @@
                 : ""
             }
             <button class="button button--small button--secondary" data-action="pack-product" data-id="${escapeHtml(product.id)}" type="button">
-              Pack
+              Pack without order
             </button>
             ${
               product.requiresAssembly
@@ -1373,13 +1543,13 @@
         <div class="detail-card__head">
           <div>
             <h3>Automatic production queue</h3>
-            <p class="helper-text">Active product target stock drives the queue automatically.</p>
+            <p class="helper-text">Open sales orders and active product target stock drive the queue automatically.</p>
           </div>
           <span class="badge badge--active">${formatNumber(computed.productionQueue.length)} rows</span>
         </div>
         <div class="detail-grid">
           <div>
-            <p class="detail__label">Need from product targets</p>
+            <p class="detail__label">Total required parts</p>
             <div class="detail__value">${formatNumber(computed.totalQueueRequiredQty)}</div>
           </div>
           <div>
@@ -1430,13 +1600,13 @@
       computed.productionQueue,
       (row) => renderQueueCard(row, false),
       "Nothing needs printing right now.",
-      "As soon as active products fall below target stock, this queue will populate automatically.",
+      "Open orders and active product target-stock gaps populate this queue automatically.",
     );
   }
 
   function renderQueueCard(row, compact) {
     const sourceList = row.sources
-      .map((source) => `${source.productName}: ${formatNumber(source.quantity)}`)
+      .map((source) => `${source.sourceType === "sales_order" ? "Order" : "Target"} · ${source.productName}: ${formatNumber(source.quantity)}`)
       .join(" · ");
 
     return `
@@ -1456,7 +1626,15 @@
 
         <div class="detail-grid">
           <div>
-            <p class="detail__label">Need from targets</p>
+            <p class="detail__label">Order demand</p>
+            <div class="detail__value">${formatNumber(row.orderRequiredQty)}</div>
+          </div>
+          <div>
+            <p class="detail__label">Target demand</p>
+            <div class="detail__value">${formatNumber(row.targetRequiredQty)}</div>
+          </div>
+          <div>
+            <p class="detail__label">Total required</p>
             <div class="detail__value">${formatNumber(row.requiredQty)}</div>
           </div>
           <div>
@@ -1653,6 +1831,31 @@
     }
   }
 
+  async function handleSalesOrderSubmit(event) {
+    event.preventDefault();
+    try {
+      const payload = readSalesOrderForm();
+      if (!payload.orderNumber || !payload.orderDate) {
+        window.alert("Order number and date are required.");
+        return;
+      }
+      const mergedItems = new Map();
+      for (const item of payload.items) {
+        if (!item.productId || item.quantity <= 0) {
+          window.alert("Each order row needs a product and a quantity greater than zero.");
+          return;
+        }
+        mergedItems.set(item.productId, (mergedItems.get(item.productId) || 0) + item.quantity);
+      }
+      payload.items = Array.from(mergedItems.entries()).map(([productId, quantity]) => ({ productId, quantity }));
+      await mutateState(API_ENDPOINTS.salesOrders, payload);
+      ui.salesOrderDraft = blankSalesOrderDraft();
+      render();
+    } catch (error) {
+      handlePersistenceError(error);
+    }
+  }
+
   function openQueueView() {
     ui.activeTab = "queue";
     render();
@@ -1685,6 +1888,42 @@
     }
     ui.printerFormDraft = clone(printer);
     ui.activeTab = "printers";
+    render();
+  }
+
+  function startSalesOrderEdit(id) {
+    const order = state.salesOrders.find((entry) => entry.id === id && entry.status === "open");
+    if (!order) {
+      return;
+    }
+    ui.salesOrderDraft = {
+      id: order.id,
+      orderNumber: order.orderNumber,
+      orderDate: order.orderDate,
+      items: order.items.map((item) => ({ productId: item.productId, quantity: item.quantity })),
+    };
+    ui.activeTab = "sales";
+    render();
+  }
+
+  async function packSalesOrder(id) {
+    const order = state.salesOrders.find((entry) => entry.id === id);
+    if (!order || !window.confirm(`Pack order ${order.orderNumber} and deduct its product stock?`)) {
+      return;
+    }
+    await mutateState(API_ENDPOINTS.salesOrderActions, { action: "pack", orderId: id });
+    render();
+  }
+
+  async function cancelSalesOrder(id) {
+    const order = state.salesOrders.find((entry) => entry.id === id);
+    if (!order || !window.confirm(`Cancel order ${order.orderNumber}? Its open demand will be removed.`)) {
+      return;
+    }
+    await mutateState(API_ENDPOINTS.salesOrderActions, { action: "cancel", orderId: id });
+    if (ui.salesOrderDraft.id === id) {
+      ui.salesOrderDraft = blankSalesOrderDraft();
+    }
     render();
   }
 
@@ -2051,6 +2290,8 @@
     const printers = state.printers.slice().sort(sortByName);
     const activePrinters = printers.filter((printer) => printer.active);
     const partsById = new Map(parts.map((part) => [part.id, part]));
+    const productsById = new Map(products.map((product) => [product.id, product]));
+    const demandModel = buildDemandModel({ parts, products, salesOrders: state.salesOrders });
     const printStateByPartId = new Map(
       state.printState.map((entry) => [entry.partId, normalizePrintStateEntry(entry)]),
     );
@@ -2089,10 +2330,18 @@
       });
     });
 
-    const productSummaries = products.map((product) => summarizeProduct(product, partsById));
+    const productSummaries = products.map((product) =>
+      summarizeProduct(product, partsById, demandModel.productDemandById.get(product.id)),
+    );
+    const orderSummaries = buildSalesOrderSummaries(state.salesOrders, productsById, partsById);
+    const openOrderSummaries = orderSummaries.filter((order) => order.status === "open");
+    const closedOrderSummaries = orderSummaries
+      .filter((order) => order.status !== "open")
+      .sort((left, right) => new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime());
     const partActivityEntries = buildPartActivityEntries(state, partsById);
     const productActivityEntries = buildProductActivityEntries(state, new Map(products.map((product) => [product.id, product])));
-    const allActivityEntries = [...partActivityEntries, ...productActivityEntries].sort(
+    const salesActivityEntries = buildSalesActivityEntries(state);
+    const allActivityEntries = [...partActivityEntries, ...productActivityEntries, ...salesActivityEntries].sort(
       (left, right) => new Date(right.timestamp).getTime() - new Date(left.timestamp).getTime(),
     );
     const filteredActivityEntries = filterActivityEntries(allActivityEntries, ui.activityFilters);
@@ -2145,28 +2394,11 @@
       .filter((part) => part.inventoryQty < part.minStock)
       .sort((left, right) => right.minStockGap - left.minStockGap);
 
-    const demandByPartId = new Map();
-    const sourcesByPartId = new Map();
-    productSummaries
-      .filter((product) => product.active && product.targetGap > 0)
-      .forEach((product) => {
-        product.requirements.forEach((requirement) => {
-          const existing = demandByPartId.get(requirement.partId) || 0;
-          demandByPartId.set(requirement.partId, existing + requirement.quantity * product.targetGap);
-          const sources = sourcesByPartId.get(requirement.partId) || [];
-          sources.push({
-            productId: product.id,
-            productName: product.name,
-            quantity: requirement.quantity * product.targetGap,
-          });
-          sourcesByPartId.set(requirement.partId, sources);
-        });
-      });
-
     const productionQueue = parts
       .map((part) => {
-        const requiredQty = Math.max(demandByPartId.get(part.id) || 0, 0);
-        const shortageQty = Math.max(requiredQty - part.inventoryQty, 0);
+        const demand = demandModel.partDemandById.get(part.id);
+        const requiredQty = demand?.requiredQty || 0;
+        const shortageQty = demand?.shortageQty || 0;
         const printState = printStateByPartId.get(part.id) || emptyPrintStateEntry(part.id);
         const plannedQty = printState.plannedQty;
         const inProgressQty = printState.inProgressQty;
@@ -2192,7 +2424,7 @@
           return null;
         }
 
-        const priority = blockingProducts > 0 || needsPrinterSetup ? "high" : remainingQty > 0 ? "medium" : "low";
+        const priority = (demand?.orderShortageQty || 0) > 0 || blockingProducts > 0 || needsPrinterSetup ? "high" : remainingQty > 0 ? "medium" : "low";
         return {
           part,
           partId: part.id,
@@ -2212,7 +2444,12 @@
           readyPrinterCount,
           parallelTimeLabel,
           updatedAt: printState.updatedAt,
-          sources: sourcesByPartId.get(part.id) || [],
+          sources: demand?.sources || [],
+          orderRequiredQty: demand?.orderRequiredQty || 0,
+          targetRequiredQty: demand?.targetRequiredQty || 0,
+          orderShortageQty: demand?.orderShortageQty || 0,
+          targetShortageQty: demand?.targetShortageQty || 0,
+          oldestOrderDate: demand?.oldestOrderDate || "",
           priority,
           priorityClass:
             priority === "high"
@@ -2221,7 +2458,9 @@
                 ? "pill--accent"
                 : "pill--warning",
           reason:
-            needsPrinterSetup
+            (demand?.orderShortageQty || 0) > 0
+              ? "Needed for open sales orders"
+              : needsPrinterSetup
               ? `No active printer is loaded for ${part.color} / ${part.material}`
               : blockingProducts > 0
               ? `${blockingProducts} active product${blockingProducts === 1 ? "" : "s"} blocked right now`
@@ -2233,6 +2472,12 @@
         const priorityDiff = PRIORITY_ORDER[left.priority] - PRIORITY_ORDER[right.priority];
         if (priorityDiff !== 0) {
           return priorityDiff;
+        }
+        if (left.oldestOrderDate || right.oldestOrderDate) {
+          const dateDiff = (left.oldestOrderDate || "9999-12-31").localeCompare(right.oldestOrderDate || "9999-12-31");
+          if (dateDiff !== 0) {
+            return dateDiff;
+          }
         }
         return right.remainingQty - left.remainingQty;
       });
@@ -2324,6 +2569,9 @@
       productHistoryById,
       productHistoryTotalById,
       productSummaries,
+      orderSummaries,
+      openOrderSummaries,
+      closedOrderSummaries,
       printerSummaries,
       readyToSell,
       blockedProducts,
@@ -2331,9 +2579,11 @@
       suggestedJobs,
       productionQueue,
       queueByPartId,
-      currentDemandByPartId: new Map(parts.map((part) => [part.id, Math.max(demandByPartId.get(part.id) || 0, 0)])),
+      currentDemandByPartId: new Map(
+        parts.map((part) => [part.id, demandModel.partDemandById.get(part.id)?.requiredQty || 0]),
+      ),
       currentDemandGapByPartId: new Map(
-        parts.map((part) => [part.id, Math.max((demandByPartId.get(part.id) || 0) - part.inventoryQty, 0)]),
+        parts.map((part) => [part.id, demandModel.partDemandById.get(part.id)?.shortageQty || 0]),
       ),
       queueNeededByPartId: new Map(productionQueue.map((row) => [row.partId, row.shortageQty])),
       suggestedQtyByPartId: new Map(productionQueue.map((row) => [row.partId, row.remainingQty])),
@@ -2348,6 +2598,13 @@
       buildableProductsCount: productSummaries.filter(
         (product) => product.buildableNow > 0 && product.active && product.requiresAssembly,
       ).length,
+      totalOpenSalesUnits: openOrderSummaries.reduce(
+        (sum, order) =>
+          sum + order.items.reduce((itemSum, item) => itemSum + Math.max(item.quantity - item.fulfilledQuantity, 0), 0),
+        0,
+      ),
+      readyOrderCount: openOrderSummaries.filter((order) => order.ready).length,
+      blockedOrderCount: openOrderSummaries.filter((order) => !order.ready).length,
       totalQueueRequiredQty: productionQueue.reduce((sum, row) => sum + row.requiredQty, 0),
       totalQueueRemainingQty: productionQueue.reduce((sum, row) => sum + row.remainingQty, 0),
       totalQueueRemainingPrintTimeMinutes: productionQueue.reduce(
@@ -2366,7 +2623,72 @@
     };
   }
 
-  function summarizeProduct(product, partsById) {
+  function buildSalesOrderSummaries(orders, productsById, partsById) {
+    const finishedPool = new Map(
+      Array.from(productsById.values()).map((product) => [product.id, product.finishedStock || 0]),
+    );
+    const partPool = new Map(Array.from(partsById.values()).map((part) => [part.id, part.inventoryQty || 0]));
+    const openOrders = orders
+      .filter((order) => order.status === "open")
+      .slice()
+      .sort((left, right) => {
+        const dateDiff = String(left.orderDate).localeCompare(String(right.orderDate));
+        return dateDiff || String(left.createdAt).localeCompare(String(right.createdAt));
+      });
+
+    const summarize = (order, reserveStock) => {
+      const shortages = [];
+      const items = order.items.map((item) => {
+        const product = productsById.get(item.productId);
+        const remainingQty = Math.max(item.quantity - item.fulfilledQuantity, 0);
+        if (reserveStock && remainingQty > 0 && !product) {
+          shortages.push({
+            productName: item.productName || "Missing product",
+            shortageQty: remainingQty,
+            stockLabel: "product units",
+          });
+        } else if (reserveStock && remainingQty > 0 && product.requiresAssembly) {
+          const available = finishedPool.get(product.id) || 0;
+          const reserved = Math.min(available, remainingQty);
+          finishedPool.set(product.id, available - reserved);
+          if (reserved < remainingQty) {
+            shortages.push({
+              productName: product.name,
+              shortageQty: remainingQty - reserved,
+              stockLabel: "finished units",
+            });
+          }
+        } else if (reserveStock && remainingQty > 0 && product) {
+          product.partRequirements.forEach((requirement) => {
+            const needed = requirement.quantity * remainingQty;
+            const available = partPool.get(requirement.partId) || 0;
+            const reserved = Math.min(available, needed);
+            partPool.set(requirement.partId, available - reserved);
+            if (reserved < needed) {
+              const part = partsById.get(requirement.partId);
+              shortages.push({
+                productName: product.name,
+                shortageQty: needed - reserved,
+                stockLabel: `${part?.name || "printed part"} units`,
+              });
+            }
+          });
+        }
+        return {
+          ...item,
+          productName: product?.name || item.productName,
+          productSku: product?.sku || item.productSku,
+        };
+      });
+      return { ...order, items, shortages, ready: reserveStock && shortages.length === 0 };
+    };
+
+    const openSummaries = openOrders.map((order) => summarize(order, true));
+    const closedSummaries = orders.filter((order) => order.status !== "open").map((order) => summarize(order, false));
+    return [...openSummaries, ...closedSummaries];
+  }
+
+  function summarizeProduct(product, partsById, demand = {}) {
     const requirements = product.partRequirements.map((requirement) => {
       const part = partsById.get(requirement.partId);
       const available = part ? part.inventoryQty : 0;
@@ -2407,6 +2729,9 @@
       targetGap,
       printTimeMinutes,
       totalSellableNow: product.requiresAssembly ? product.finishedStock + buildableNow : buildableNow,
+      currentSalesDemand: demand.salesDemand || 0,
+      salesUnitsToProduce: demand.salesUnitsToProduce || 0,
+      targetUnitsToProduce: demand.targetUnitsToProduce || 0,
     };
   }
 
@@ -2455,6 +2780,18 @@
       material: dom.printerForm.elements.material.value.trim(),
       active: dom.printerForm.elements.active.checked,
       notes: dom.printerForm.elements.notes.value.trim(),
+    };
+  }
+
+  function readSalesOrderForm() {
+    return {
+      id: dom.salesOrderForm.elements.id.value,
+      orderNumber: dom.salesOrderForm.elements.orderNumber.value.trim(),
+      orderDate: dom.salesOrderForm.elements.orderDate.value,
+      items: Array.from(dom.salesOrderItems.querySelectorAll(".order-item-row")).map((row) => ({
+        productId: row.querySelector('[data-order-item="productId"]').value,
+        quantity: toNonNegativeInteger(row.querySelector('[data-order-item="quantity"]').value),
+      })),
     };
   }
 
@@ -2563,6 +2900,15 @@
     };
   }
 
+  function blankSalesOrderDraft() {
+    return {
+      id: "",
+      orderNumber: "",
+      orderDate: localDateInputValue(new Date()),
+      items: [{ productId: "", quantity: 1 }],
+    };
+  }
+
   function syncProductDraftForAssemblyMode(draft) {
     if (draft.requiresAssembly) {
       if (!draft.partRequirements.length) {
@@ -2589,6 +2935,7 @@
     ui.partFormDraft = blankPartDraft();
     ui.productFormDraft = blankProductDraft();
     ui.printerFormDraft = blankPrinterDraft();
+    ui.salesOrderDraft = blankSalesOrderDraft();
   }
 
   function createEmptyState() {
@@ -2601,6 +2948,8 @@
       partInventoryMovements: [],
       finishedInventoryMovements: [],
       printEvents: [],
+      salesOrders: [],
+      salesOrderEvents: [],
     };
   }
 
@@ -2643,6 +2992,10 @@
         ? parsed.finishedInventoryMovements.map((entry) => normalizeFinishedInventoryMovement(entry))
         : [],
       printEvents: Array.isArray(parsed.printEvents) ? parsed.printEvents.map((entry) => normalizePrintEvent(entry)) : [],
+      salesOrders: Array.isArray(parsed.salesOrders) ? parsed.salesOrders.map((order) => normalizeSalesOrder(order)) : [],
+      salesOrderEvents: Array.isArray(parsed.salesOrderEvents)
+        ? parsed.salesOrderEvents.map((entry) => normalizeSalesOrderEvent(entry))
+        : [],
       meta: normalizeRemoteMeta(parsed.meta),
     };
   }
@@ -2746,6 +3099,8 @@
     state.partInventoryMovements = nextState.partInventoryMovements;
     state.finishedInventoryMovements = nextState.finishedInventoryMovements;
     state.printEvents = nextState.printEvents;
+    state.salesOrders = nextState.salesOrders;
+    state.salesOrderEvents = nextState.salesOrderEvents;
   }
 
   function handlePersistenceError(error) {
@@ -2842,6 +3197,45 @@
       note: entry.note || "",
       actor: normalizeActorName(entry.actor),
       createdAt: entry.createdAt || new Date().toISOString(),
+    };
+  }
+
+  function normalizeSalesOrder(order) {
+    return {
+      id: order.id || "",
+      orderNumber: order.orderNumber || "",
+      orderDate: order.orderDate || "",
+      source: order.source || "manual",
+      externalId: order.externalId || "",
+      status: ["open", "packed", "cancelled"].includes(order.status) ? order.status : "open",
+      createdAt: order.createdAt || "",
+      updatedAt: order.updatedAt || "",
+      createdBy: normalizeActorName(order.createdBy),
+      updatedBy: normalizeActorName(order.updatedBy),
+      packedAt: order.packedAt || "",
+      packedBy: normalizeActorName(order.packedBy),
+      cancelledAt: order.cancelledAt || "",
+      cancelledBy: normalizeActorName(order.cancelledBy),
+      items: Array.isArray(order.items)
+        ? order.items.map((item) => ({
+            productId: item.productId || "",
+            productName: item.productName || "",
+            productSku: item.productSku || "",
+            quantity: toNonNegativeInteger(item.quantity),
+            fulfilledQuantity: toNonNegativeInteger(item.fulfilledQuantity),
+          }))
+        : [],
+    };
+  }
+
+  function normalizeSalesOrderEvent(entry) {
+    return {
+      id: entry.id || generateId("sales-event"),
+      orderId: entry.orderId || "",
+      action: entry.action || "",
+      note: entry.note || "",
+      actor: normalizeActorName(entry.actor),
+      createdAt: entry.createdAt || "",
     };
   }
 
@@ -2986,6 +3380,7 @@
             <option value="part" ${ui.activityFilters.scope === "part" ? "selected" : ""}>Part inventory</option>
             <option value="product" ${ui.activityFilters.scope === "product" ? "selected" : ""}>Finished goods</option>
             <option value="queue" ${ui.activityFilters.scope === "queue" ? "selected" : ""}>Queue events</option>
+            <option value="sales" ${ui.activityFilters.scope === "sales" ? "selected" : ""}>Sales orders</option>
           </select>
         </label>
         <label class="field activity-filter-field">
@@ -3142,6 +3537,27 @@
       .sort((left, right) => new Date(right.timestamp).getTime() - new Date(left.timestamp).getTime());
   }
 
+  function buildSalesActivityEntries(state) {
+    const ordersById = new Map(state.salesOrders.map((order) => [order.id, order]));
+    return state.salesOrderEvents.map((entry) => {
+      const order = ordersById.get(entry.orderId);
+      return {
+        id: entry.id,
+        entityId: entry.orderId,
+        title: order ? `Order ${order.orderNumber}` : "Sales order",
+        subtitle: "Sales",
+        scope: "sales",
+        actionKey: `order_${entry.action}`,
+        badgeLabel: capitalizeWords(entry.action),
+        badgeClass: entry.action === "packed" ? "badge--active" : entry.action === "cancelled" ? "badge--inactive" : "status--planned",
+        description: entry.note || `Sales order ${entry.action}.`,
+        note: "",
+        actor: entry.actor,
+        timestamp: entry.createdAt,
+      };
+    });
+  }
+
   function filterActivityEntries(entries, filters) {
     return entries.filter((entry) => {
       if (filters.scope !== "all" && entry.scope !== filters.scope) {
@@ -3256,6 +3672,9 @@
     if (reason === "packed_direct_product") {
       return `${partName} stock was packed directly as sellable product.`;
     }
+    if (reason === "sales_order_packed_direct") {
+      return `${partName} stock was packed for a sales order.`;
+    }
     return `${partName} inventory changed.`;
   }
 
@@ -3265,6 +3684,9 @@
     }
     if (reason === "packed") {
       return `${productName} was packed from finished stock.`;
+    }
+    if (reason === "sales_order_packed") {
+      return `${productName} was packed for a sales order.`;
     }
     if (reason === "manual_adjustment") {
       return `${productName} finished stock was adjusted manually.`;
@@ -3319,6 +3741,12 @@
     }
     if (actionKey === "packed") {
       return "Packed finished goods";
+    }
+    if (actionKey === "sales_order_packed") {
+      return "Packed order stock";
+    }
+    if (actionKey === "sales_order_packed_direct") {
+      return "Packed direct order stock";
     }
     if (actionKey === "plan") {
       return "Queue planned";
@@ -3444,10 +3872,27 @@
   }
 
   function formatTimestamp(timestamp) {
+    if (!timestamp) {
+      return "unknown time";
+    }
     return new Intl.DateTimeFormat("en-US", {
       dateStyle: "medium",
       timeStyle: "short",
     }).format(new Date(timestamp));
+  }
+
+  function formatOrderDate(value) {
+    if (!value) {
+      return "No date";
+    }
+    return new Intl.DateTimeFormat("en-US", { dateStyle: "medium", timeZone: "UTC" }).format(
+      new Date(`${value}T00:00:00Z`),
+    );
+  }
+
+  function localDateInputValue(date) {
+    const offsetDate = new Date(date.getTime() - date.getTimezoneOffset() * 60 * 1000);
+    return offsetDate.toISOString().slice(0, 10);
   }
 
   function toNonNegativeInteger(value) {

@@ -1,3 +1,5 @@
+import { buildDemandModel } from "../../../demand-model.js";
+
 export class ApiError extends Error {
   constructor(status, message) {
     super(message);
@@ -235,6 +237,8 @@ export const SEED_STATE = {
       completedAt: "2026-05-02T05:40:00.000Z",
     },
   ],
+  salesOrders: [],
+  salesOrderEvents: [],
 };
 
 const SCHEMA_STATEMENTS = [
@@ -247,11 +251,19 @@ const SCHEMA_STATEMENTS = [
   "CREATE TABLE IF NOT EXISTS part_inventory_movements (id TEXT PRIMARY KEY, part_id TEXT NOT NULL, delta_qty INTEGER NOT NULL, reason TEXT NOT NULL, reference_type TEXT NOT NULL DEFAULT '', reference_id TEXT NOT NULL DEFAULT '', note TEXT NOT NULL DEFAULT '', actor TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, FOREIGN KEY (part_id) REFERENCES parts(id) ON DELETE RESTRICT)",
   "CREATE TABLE IF NOT EXISTS finished_inventory_movements (id TEXT PRIMARY KEY, product_id TEXT NOT NULL, delta_qty INTEGER NOT NULL, reason TEXT NOT NULL, reference_type TEXT NOT NULL DEFAULT '', reference_id TEXT NOT NULL DEFAULT '', note TEXT NOT NULL DEFAULT '', actor TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE RESTRICT)",
   "CREATE TABLE IF NOT EXISTS print_events (id TEXT PRIMARY KEY, part_id TEXT NOT NULL, action TEXT NOT NULL, quantity INTEGER NOT NULL, note TEXT NOT NULL DEFAULT '', actor TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, FOREIGN KEY (part_id) REFERENCES parts(id) ON DELETE RESTRICT)",
+  "CREATE TABLE IF NOT EXISTS sales_orders (id TEXT PRIMARY KEY, order_number TEXT NOT NULL, order_date TEXT NOT NULL, source TEXT NOT NULL DEFAULT 'manual', external_id TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'open', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, created_by TEXT NOT NULL DEFAULT '', updated_by TEXT NOT NULL DEFAULT '', packed_at TEXT NOT NULL DEFAULT '', packed_by TEXT NOT NULL DEFAULT '', cancelled_at TEXT NOT NULL DEFAULT '', cancelled_by TEXT NOT NULL DEFAULT '', CHECK (status IN ('open', 'packed', 'cancelled')), UNIQUE (source, order_number))",
+  "CREATE TABLE IF NOT EXISTS sales_order_items (order_id TEXT NOT NULL, product_id TEXT NOT NULL, product_name TEXT NOT NULL DEFAULT '', product_sku TEXT NOT NULL DEFAULT '', quantity INTEGER NOT NULL, fulfilled_quantity INTEGER NOT NULL DEFAULT 0, sort_order INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (order_id, product_id), FOREIGN KEY (order_id) REFERENCES sales_orders(id) ON DELETE CASCADE, FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE RESTRICT, CHECK (quantity > 0), CHECK (fulfilled_quantity >= 0 AND fulfilled_quantity <= quantity))",
+  "CREATE TABLE IF NOT EXISTS sales_order_events (id TEXT PRIMARY KEY, order_id TEXT NOT NULL, action TEXT NOT NULL, note TEXT NOT NULL DEFAULT '', actor TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, FOREIGN KEY (order_id) REFERENCES sales_orders(id) ON DELETE CASCADE)",
   "CREATE INDEX IF NOT EXISTS idx_product_requirements_product_id ON product_requirements(product_id, sort_order)",
   "CREATE INDEX IF NOT EXISTS idx_completed_prints_completed_at ON completed_prints(completed_at DESC)",
   "CREATE INDEX IF NOT EXISTS idx_part_inventory_movements_part_created_at ON part_inventory_movements(part_id, created_at DESC)",
   "CREATE INDEX IF NOT EXISTS idx_finished_inventory_movements_product_created_at ON finished_inventory_movements(product_id, created_at DESC)",
   "CREATE INDEX IF NOT EXISTS idx_print_events_part_created_at ON print_events(part_id, created_at DESC)",
+  "CREATE INDEX IF NOT EXISTS idx_sales_orders_status_date ON sales_orders(status, order_date, created_at)",
+  "CREATE INDEX IF NOT EXISTS idx_sales_order_items_product ON sales_order_items(product_id, order_id)",
+  "CREATE INDEX IF NOT EXISTS idx_sales_order_events_order_created ON sales_order_events(order_id, created_at DESC)",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_sales_order_single_pack ON sales_order_events(order_id, action) WHERE action = 'packed'",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_sales_order_single_close ON sales_order_events(order_id) WHERE action IN ('packed', 'cancelled')",
 ];
 
 export async function getDb(context) {
@@ -289,6 +301,9 @@ export async function readState(db) {
     partInventoryMovementsResult,
     finishedInventoryMovementsResult,
     printEventsResult,
+    salesOrdersResult,
+    salesOrderItemsResult,
+    salesOrderEventsResult,
   ] = await db.batch([
     db.prepare(
       `SELECT id, name, sku, color, material, inventory_qty, min_stock, print_time_minutes, image_ref, file_ref, notes
@@ -338,6 +353,23 @@ export async function readState(db) {
        ORDER BY created_at DESC
        LIMIT 400`,
     ),
+    db.prepare(
+      `SELECT id, order_number, order_date, source, external_id, status, created_at, updated_at,
+              created_by, updated_by, packed_at, packed_by, cancelled_at, cancelled_by
+       FROM sales_orders
+       ORDER BY CASE status WHEN 'open' THEN 0 WHEN 'packed' THEN 1 ELSE 2 END, order_date ASC, created_at ASC`,
+    ),
+    db.prepare(
+      `SELECT order_id, product_id, product_name, product_sku, quantity, fulfilled_quantity, sort_order
+       FROM sales_order_items
+       ORDER BY order_id ASC, sort_order ASC`,
+    ),
+    db.prepare(
+      `SELECT id, order_id, action, note, actor, created_at
+       FROM sales_order_events
+       ORDER BY created_at DESC
+       LIMIT 400`,
+    ),
   ]);
 
   const requirementsByProductId = new Map();
@@ -348,6 +380,19 @@ export async function readState(db) {
       quantity: toNonNegativeInteger(row.quantity),
     });
     requirementsByProductId.set(row.product_id, list);
+  }
+
+  const itemsByOrderId = new Map();
+  for (const row of salesOrderItemsResult.results || []) {
+    const list = itemsByOrderId.get(row.order_id) || [];
+    list.push({
+      productId: row.product_id,
+      productName: row.product_name,
+      productSku: row.product_sku,
+      quantity: row.quantity,
+      fulfilledQuantity: row.fulfilled_quantity,
+    });
+    itemsByOrderId.set(row.order_id, list);
   }
 
   return normalizeState({
@@ -429,12 +474,40 @@ export async function readState(db) {
       actor: row.actor,
       createdAt: row.created_at,
     })),
+    salesOrders: (salesOrdersResult.results || []).map((row) => ({
+      id: row.id,
+      orderNumber: row.order_number,
+      orderDate: row.order_date,
+      source: row.source,
+      externalId: row.external_id,
+      status: row.status,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      createdBy: row.created_by,
+      updatedBy: row.updated_by,
+      packedAt: row.packed_at,
+      packedBy: row.packed_by,
+      cancelledAt: row.cancelled_at,
+      cancelledBy: row.cancelled_by,
+      items: itemsByOrderId.get(row.id) || [],
+    })),
+    salesOrderEvents: (salesOrderEventsResult.results || []).map((row) => ({
+      id: row.id,
+      orderId: row.order_id,
+      action: row.action,
+      note: row.note,
+      actor: row.actor,
+      createdAt: row.created_at,
+    })),
   });
 }
 
 export async function replaceState(db, inputState) {
   const state = normalizeState(inputState);
   const statements = [
+    db.prepare("DELETE FROM sales_order_events"),
+    db.prepare("DELETE FROM sales_order_items"),
+    db.prepare("DELETE FROM sales_orders"),
     db.prepare("DELETE FROM print_events"),
     db.prepare("DELETE FROM finished_inventory_movements"),
     db.prepare("DELETE FROM part_inventory_movements"),
@@ -502,6 +575,53 @@ export async function replaceState(db, inputState) {
       );
     });
 
+  }
+
+  for (const order of state.salesOrders) {
+    statements.push(
+      db
+        .prepare(
+          `INSERT INTO sales_orders
+            (id, order_number, order_date, source, external_id, status, created_at, updated_at,
+             created_by, updated_by, packed_at, packed_by, cancelled_at, cancelled_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .bind(
+          order.id,
+          order.orderNumber,
+          order.orderDate,
+          order.source,
+          order.externalId,
+          order.status,
+          order.createdAt,
+          order.updatedAt,
+          order.createdBy,
+          order.updatedBy,
+          order.packedAt,
+          order.packedBy,
+          order.cancelledAt,
+          order.cancelledBy,
+        ),
+    );
+    order.items.forEach((item, index) => {
+      statements.push(
+        db
+          .prepare(
+            `INSERT INTO sales_order_items
+              (order_id, product_id, product_name, product_sku, quantity, fulfilled_quantity, sort_order)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .bind(
+            order.id,
+            item.productId,
+            item.productName,
+            item.productSku,
+            item.quantity,
+            item.fulfilledQuantity,
+            index,
+          ),
+      );
+    });
   }
 
   for (const printer of state.printers) {
@@ -587,6 +707,19 @@ export async function replaceState(db, inputState) {
         partId: entry.partId,
         action: entry.action,
         quantity: entry.quantity,
+        note: entry.note,
+        actor: entry.actor,
+        createdAt: entry.createdAt,
+      }),
+    );
+  }
+
+  for (const entry of state.salesOrderEvents) {
+    statements.push(
+      createSalesOrderEventStatement(db, {
+        id: entry.id,
+        orderId: entry.orderId,
+        action: entry.action,
         note: entry.note,
         actor: entry.actor,
         createdAt: entry.createdAt,
@@ -811,11 +944,12 @@ export async function deleteProduct(db, id) {
   assert(id, "Product id is required.");
   const product = await fetchProductRow(db, id);
   assert(product, "Product not found.", 404);
-  const finishedMovement = await db
-    .prepare("SELECT id FROM finished_inventory_movements WHERE product_id = ? LIMIT 1")
-    .bind(id)
-    .first();
+  const [finishedMovement, salesOrderItem] = await Promise.all([
+    db.prepare("SELECT id FROM finished_inventory_movements WHERE product_id = ? LIMIT 1").bind(id).first(),
+    db.prepare("SELECT order_id FROM sales_order_items WHERE product_id = ? LIMIT 1").bind(id).first(),
+  ]);
   assert(!finishedMovement, "Cannot delete product because finished inventory history still references it.");
+  assert(!salesOrderItem, "Cannot delete product because sales order history references it. Deactivate it instead.");
   await runInTransaction(db, [db.prepare("DELETE FROM products WHERE id = ?").bind(id)]);
 }
 
@@ -975,6 +1109,222 @@ export async function packProduct(db, { productId, quantity, actor }) {
   }
 
   await runInTransaction(db, statements);
+}
+
+export async function saveSalesOrder(db, input, actor = "") {
+  const normalizedActor = normalizeActor(actor);
+  const draft = normalizeSalesOrder({ ...input, source: input?.source || "manual", status: "open" });
+  assert(draft.orderNumber, "Order number is required.");
+  assert(draft.orderDate, "Order date must use YYYY-MM-DD format.");
+  assert(draft.items.length > 0, "Add at least one product to the order.");
+
+  const timestamp = new Date().toISOString();
+  const id = draft.id || createId("sales-order");
+  const existing = draft.id
+    ? await db.prepare("SELECT id, status, created_at, created_by, source FROM sales_orders WHERE id = ?").bind(id).first()
+    : null;
+  if (draft.id) {
+    assert(existing, "Sales order not found.", 404);
+    assert(existing.status === "open", "Only open sales orders can be edited.", 409);
+  }
+
+  const duplicate = await db
+    .prepare("SELECT id FROM sales_orders WHERE source = ? AND order_number = ? AND id <> ? LIMIT 1")
+    .bind(draft.source, draft.orderNumber, id)
+    .first();
+  assert(!duplicate, "That order number already exists for this source.", 409);
+
+  const products = new Map();
+  for (const item of draft.items) {
+    const product = await fetchProductRow(db, item.productId);
+    assert(product, "One or more selected products no longer exist.");
+    products.set(item.productId, product);
+  }
+
+  const createdAt = existing?.created_at || timestamp;
+  const createdBy = existing?.created_by || normalizedActor;
+  const statements = [
+    db
+      .prepare(
+        `INSERT INTO sales_orders
+          (id, order_number, order_date, source, external_id, status, created_at, updated_at,
+           created_by, updated_by, packed_at, packed_by, cancelled_at, cancelled_by)
+         VALUES (?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, '', '', '', '')
+         ON CONFLICT(id) DO UPDATE SET
+          order_number = excluded.order_number,
+          order_date = excluded.order_date,
+          source = excluded.source,
+          external_id = excluded.external_id,
+          updated_at = excluded.updated_at,
+          updated_by = excluded.updated_by`,
+      )
+      .bind(
+        id,
+        draft.orderNumber,
+        draft.orderDate,
+        draft.source,
+        draft.externalId,
+        createdAt,
+        timestamp,
+        createdBy,
+        normalizedActor,
+      ),
+    db.prepare("DELETE FROM sales_order_items WHERE order_id = ?").bind(id),
+  ];
+
+  draft.items.forEach((item, index) => {
+    const product = products.get(item.productId);
+    statements.push(
+      db
+        .prepare(
+          `INSERT INTO sales_order_items
+            (order_id, product_id, product_name, product_sku, quantity, fulfilled_quantity, sort_order)
+           VALUES (?, ?, ?, ?, ?, 0, ?)`,
+        )
+        .bind(id, item.productId, product.name, product.sku, item.quantity, index),
+    );
+  });
+  statements.push(
+    createSalesOrderEventStatement(db, {
+      id: createId("sales-event"),
+      orderId: id,
+      action: existing ? "updated" : "created",
+      note: `${existing ? "Updated" : "Created"} order ${draft.orderNumber}.`,
+      actor: normalizedActor,
+      createdAt: timestamp,
+    }),
+  );
+
+  await runInTransaction(db, statements);
+  return id;
+}
+
+export async function packSalesOrder(db, { orderId, actor }) {
+  assert(orderId, "Sales order id is required.");
+  const state = await readState(db);
+  const order = state.salesOrders.find((entry) => entry.id === orderId);
+  assert(order, "Sales order not found.", 404);
+  assert(order.status === "open", "Only open sales orders can be packed.", 409);
+
+  const productsById = new Map(state.products.map((product) => [product.id, product]));
+  const partsById = new Map(state.parts.map((part) => [part.id, part]));
+  const finishedDeductions = new Map();
+  const partDeductions = new Map();
+
+  order.items.forEach((item) => {
+    const remainingQty = Math.max(item.quantity - item.fulfilledQuantity, 0);
+    const product = productsById.get(item.productId);
+    assert(product, `Product ${item.productName || item.productId} no longer exists.`);
+    if (product.requiresAssembly) {
+      finishedDeductions.set(product.id, (finishedDeductions.get(product.id) || 0) + remainingQty);
+      return;
+    }
+    product.partRequirements.forEach((requirement) => {
+      partDeductions.set(
+        requirement.partId,
+        (partDeductions.get(requirement.partId) || 0) + requirement.quantity * remainingQty,
+      );
+    });
+  });
+
+  finishedDeductions.forEach((quantity, productId) => {
+    const product = productsById.get(productId);
+    assert(product.finishedStock >= quantity, `Not enough finished stock is available for ${product.name}.`, 409);
+  });
+  partDeductions.forEach((quantity, partId) => {
+    const part = partsById.get(partId);
+    assert(part && part.inventoryQty >= quantity, `Not enough printed stock is available for ${part?.name || "a direct product"}.`, 409);
+  });
+
+  const timestamp = new Date().toISOString();
+  const normalizedActor = normalizeActor(actor);
+  const statements = [];
+
+  finishedDeductions.forEach((quantity, productId) => {
+    const product = productsById.get(productId);
+    statements.push(db.prepare("UPDATE products SET finished_stock = finished_stock - ? WHERE id = ?").bind(quantity, productId));
+    statements.push(
+      createFinishedMovementStatement(db, {
+        id: createId("finished-move"),
+        productId,
+        deltaQty: -quantity,
+        reason: "sales_order_packed",
+        referenceType: "sales_order",
+        referenceId: orderId,
+        note: `Packed order ${order.orderNumber}: ${quantity} ${product.name}.`,
+        actor: normalizedActor,
+        createdAt: timestamp,
+      }),
+    );
+  });
+
+  partDeductions.forEach((quantity, partId) => {
+    const part = partsById.get(partId);
+    statements.push(db.prepare("UPDATE parts SET inventory_qty = inventory_qty - ? WHERE id = ?").bind(quantity, partId));
+    statements.push(
+      createPartMovementStatement(db, {
+        id: createId("part-move"),
+        partId,
+        deltaQty: -quantity,
+        reason: "sales_order_packed_direct",
+        referenceType: "sales_order",
+        referenceId: orderId,
+        note: `Packed direct-product stock for order ${order.orderNumber}.`,
+        actor: normalizedActor,
+        createdAt: timestamp,
+      }),
+    );
+  });
+
+  statements.push(
+    db.prepare("UPDATE sales_order_items SET fulfilled_quantity = quantity WHERE order_id = ?").bind(orderId),
+    db
+      .prepare(
+        `UPDATE sales_orders
+         SET status = 'packed', packed_at = ?, packed_by = ?, updated_at = ?, updated_by = ?
+         WHERE id = ? AND status = 'open'`,
+      )
+      .bind(timestamp, normalizedActor, timestamp, normalizedActor, orderId),
+    createSalesOrderEventStatement(db, {
+      id: createId("sales-event"),
+      orderId,
+      action: "packed",
+      note: `Packed order ${order.orderNumber}.`,
+      actor: normalizedActor,
+      createdAt: timestamp,
+    }),
+  );
+
+  await runInTransaction(db, statements);
+}
+
+export async function cancelSalesOrder(db, { orderId, actor }) {
+  assert(orderId, "Sales order id is required.");
+  const order = await db
+    .prepare("SELECT id, order_number, status FROM sales_orders WHERE id = ?")
+    .bind(orderId)
+    .first();
+  assert(order, "Sales order not found.", 404);
+  assert(order.status === "open", "Only open sales orders can be cancelled.", 409);
+  const timestamp = new Date().toISOString();
+  const normalizedActor = normalizeActor(actor);
+  await runInTransaction(db, [
+    db
+      .prepare(
+        `UPDATE sales_orders
+         SET status = 'cancelled', cancelled_at = ?, cancelled_by = ?, updated_at = ?, updated_by = ?
+         WHERE id = ? AND status = 'open'`,
+      )
+      .bind(timestamp, normalizedActor, timestamp, normalizedActor, orderId),
+    createSalesOrderEventStatement(db, {
+      id: createId("sales-event"),
+      orderId,
+      action: "cancelled",
+      note: `Cancelled order ${order.order_number}.`,
+      actor: normalizedActor,
+      createdAt: timestamp,
+    }),
+  ]);
 }
 
 export async function savePrinter(db, input) {
@@ -1224,6 +1574,14 @@ export function normalizeState(input) {
     printEvents: Array.isArray(input?.printEvents)
       ? input.printEvents.map((entry) => normalizePrintEvent(entry)).filter((entry) => entry.id && entry.partId)
       : [],
+    salesOrders: Array.isArray(input?.salesOrders)
+      ? input.salesOrders.map((order) => normalizeSalesOrder(order)).filter((order) => order.id && order.orderNumber)
+      : [],
+    salesOrderEvents: Array.isArray(input?.salesOrderEvents)
+      ? input.salesOrderEvents
+          .map((entry) => normalizeSalesOrderEvent(entry))
+          .filter((entry) => entry.id && entry.orderId)
+      : [],
   };
 }
 
@@ -1351,6 +1709,63 @@ export function normalizePrintEvent(entry) {
   };
 }
 
+export function normalizeSalesOrder(order) {
+  const status = ["open", "packed", "cancelled"].includes(order?.status) ? order.status : "open";
+  const mergedItems = new Map();
+  (Array.isArray(order?.items) ? order.items : []).forEach((item) => {
+    const productId = String(item?.productId || "");
+    const quantity = toNonNegativeInteger(item?.quantity);
+    if (!productId || quantity <= 0) {
+      return;
+    }
+    const existing = mergedItems.get(productId);
+    if (existing) {
+      existing.quantity += quantity;
+      existing.fulfilledQuantity = Math.min(
+        existing.quantity,
+        existing.fulfilledQuantity + toNonNegativeInteger(item?.fulfilledQuantity),
+      );
+      return;
+    }
+    mergedItems.set(productId, {
+      productId,
+      productName: String(item?.productName || ""),
+      productSku: String(item?.productSku || ""),
+      quantity,
+      fulfilledQuantity: Math.min(quantity, toNonNegativeInteger(item?.fulfilledQuantity)),
+    });
+  });
+
+  return {
+    id: String(order?.id || ""),
+    orderNumber: String(order?.orderNumber || "").trim().slice(0, 80),
+    orderDate: normalizeDate(order?.orderDate),
+    source: String(order?.source || "manual").trim().slice(0, 40) || "manual",
+    externalId: String(order?.externalId || "").trim().slice(0, 120),
+    status,
+    createdAt: String(order?.createdAt || ""),
+    updatedAt: String(order?.updatedAt || ""),
+    createdBy: normalizeActor(order?.createdBy),
+    updatedBy: normalizeActor(order?.updatedBy),
+    packedAt: String(order?.packedAt || ""),
+    packedBy: normalizeActor(order?.packedBy),
+    cancelledAt: String(order?.cancelledAt || ""),
+    cancelledBy: normalizeActor(order?.cancelledBy),
+    items: Array.from(mergedItems.values()),
+  };
+}
+
+export function normalizeSalesOrderEvent(entry) {
+  return {
+    id: String(entry?.id || ""),
+    orderId: String(entry?.orderId || ""),
+    action: String(entry?.action || ""),
+    note: String(entry?.note || ""),
+    actor: normalizeActor(entry?.actor),
+    createdAt: String(entry?.createdAt || ""),
+  };
+}
+
 export function hasData(state) {
   return (
     state.parts.length > 0 ||
@@ -1360,7 +1775,9 @@ export function hasData(state) {
     state.completedPrints.length > 0 ||
     state.partInventoryMovements.length > 0 ||
     state.finishedInventoryMovements.length > 0 ||
-    state.printEvents.length > 0
+    state.printEvents.length > 0 ||
+    state.salesOrders.length > 0 ||
+    state.salesOrderEvents.length > 0
   );
 }
 
@@ -1461,6 +1878,16 @@ function createPrintEventStatement(db, { id, partId, action, quantity, note = ""
     .bind(id, partId, action, quantity, note, normalizeActor(actor), createdAt);
 }
 
+function createSalesOrderEventStatement(db, { id, orderId, action, note = "", actor = "", createdAt }) {
+  return db
+    .prepare(
+      `INSERT INTO sales_order_events
+        (id, order_id, action, note, actor, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    )
+    .bind(id, orderId, action, note, normalizeActor(actor), createdAt);
+}
+
 function summarizeProduct(product, partsById) {
   const requirements = product.partRequirements.map((requirement) => {
     const part = partsById.get(requirement.partId);
@@ -1485,28 +1912,16 @@ function summarizeProduct(product, partsById) {
 }
 
 function buildQueueByPartId(state) {
-  const partsById = new Map(state.parts.map((part) => [part.id, part]));
   const printStateByPartId = new Map(
     state.printState.map((entry) => [entry.partId, normalizePrintStateEntry(entry)]),
   );
-  const productSummaries = state.products.map((product) => summarizeProduct(product, partsById));
-  const demandByPartId = new Map();
-
-  productSummaries
-    .filter((product) => product.active && product.targetGap > 0)
-    .forEach((product) => {
-      product.requirements.forEach((requirement) => {
-        demandByPartId.set(
-          requirement.partId,
-          (demandByPartId.get(requirement.partId) || 0) + requirement.quantity * product.targetGap,
-        );
-      });
-    });
+  const demandModel = buildDemandModel(state);
 
   const queueByPartId = new Map();
   state.parts.forEach((part) => {
-    const requiredQty = Math.max(demandByPartId.get(part.id) || 0, 0);
-    const shortageQty = Math.max(requiredQty - part.inventoryQty, 0);
+    const demand = demandModel.partDemandById.get(part.id);
+    const requiredQty = demand?.requiredQty || 0;
+    const shortageQty = demand?.shortageQty || 0;
     const printState = printStateByPartId.get(part.id) || normalizePrintStateEntry({ partId: part.id });
     const plannedQty = printState.plannedQty;
     const inProgressQty = printState.inProgressQty;
@@ -1570,6 +1985,11 @@ function toSignedInteger(value) {
 
 function normalizeActor(value) {
   return String(value || "").trim().slice(0, 80);
+}
+
+function normalizeDate(value) {
+  const raw = String(value || "").trim();
+  return /^\d{4}-\d{2}-\d{2}$/.test(raw) ? raw : "";
 }
 
 function decodeBase64Url(value) {

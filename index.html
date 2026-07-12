@@ -32,7 +32,8 @@
       </header>
 
       <nav class="tab-bar" aria-label="Primary">
-        <button class="tab-button is-active" data-tab="dashboard" type="button">Dashboard</button>
+        <button class="tab-button is-active" data-tab="sales" type="button">Sales</button>
+        <button class="tab-button" data-tab="dashboard" type="button">Dashboard</button>
         <button class="tab-button" data-tab="parts" type="button">Parts</button>
         <button class="tab-button" data-tab="products" type="button">Products</button>
         <button class="tab-button" data-tab="printers" type="button">Printers</button>
@@ -40,7 +41,67 @@
       </nav>
 
       <main class="workspace">
-        <section id="dashboard-view" class="view">
+        <section id="sales-view" class="view">
+          <div class="sales-summary-grid" id="sales-summary"></div>
+          <div class="split-layout sales-layout">
+            <section class="panel panel--form">
+              <div class="panel__head">
+                <div>
+                  <p class="panel__eyebrow">Manual order</p>
+                  <h2>Create or update an order</h2>
+                </div>
+              </div>
+              <form id="sales-order-form" class="form-grid">
+                <input type="hidden" name="id" />
+                <label class="field">
+                  <span>Order number</span>
+                  <input name="orderNumber" type="text" maxlength="80" required placeholder="10042" />
+                </label>
+                <label class="field">
+                  <span>Order date</span>
+                  <input name="orderDate" type="date" required />
+                </label>
+                <div class="field field--full">
+                  <div class="subhead">
+                    <div>
+                      <span class="subhead__title">Products</span>
+                      <p class="subhead__copy">Select each product and the quantity ordered.</p>
+                    </div>
+                    <button class="button button--secondary" data-action="add-order-item" type="button">Add product</button>
+                  </div>
+                  <div id="sales-order-items" class="requirements-stack"></div>
+                </div>
+                <div class="form-actions field--full">
+                  <button class="button" type="submit">Add order</button>
+                  <button class="button button--ghost" data-action="cancel-order-edit" type="button" hidden>Cancel edit</button>
+                </div>
+              </form>
+            </section>
+
+            <section class="panel">
+              <div class="panel__head">
+                <div>
+                  <p class="panel__eyebrow">Fulfillment</p>
+                  <h2>Open orders</h2>
+                </div>
+                <span id="open-orders-count" class="panel__meta"></span>
+              </div>
+              <div id="open-orders-list" class="list-stack"></div>
+            </section>
+          </div>
+
+          <section class="panel sales-history-panel">
+            <div class="panel__head">
+              <div>
+                <p class="panel__eyebrow">Order history</p>
+                <h2>Packed and cancelled orders</h2>
+              </div>
+            </div>
+            <div id="sales-order-history" class="list-stack"></div>
+          </section>
+        </section>
+
+        <section id="dashboard-view" class="view" hidden>
           <div class="dashboard-grid">
             <section class="panel">
               <div class="panel__head">

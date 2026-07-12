@@ -17,6 +17,7 @@ This document is for humans working on setup, local development, deployment, and
 - [functions/api/*.js](/Users/olafwojtas/Documents/twirl.studio/print-manager/functions/api): Pages Function routes
 - [migrations/0001_initial.sql](/Users/olafwojtas/Documents/twirl.studio/print-manager/migrations/0001_initial.sql): base schema
 - [migrations/0002_inventory_ledger.sql](/Users/olafwojtas/Documents/twirl.studio/print-manager/migrations/0002_inventory_ledger.sql): activity and ledger schema
+- [migrations/0003_sales_orders.sql](/Users/olafwojtas/Documents/twirl.studio/print-manager/migrations/0003_sales_orders.sql): sales orders, items, and order events
 - [wrangler.toml](/Users/olafwojtas/Documents/twirl.studio/print-manager/wrangler.toml): Pages + D1 config
 
 ## Prerequisites
@@ -200,6 +201,8 @@ These routes all return the refreshed full state:
 - `POST /api/printers-delete`
 - `POST /api/printer-actions`
 - `POST /api/queue-actions`
+- `POST /api/sales-orders`
+- `POST /api/sales-order-actions`
 
 ## Business logic notes
 
@@ -218,13 +221,15 @@ For direct single-part products:
 
 ### Queue
 
-The print queue is derived automatically from target-stock demand.
+The print queue is derived automatically from open sales-order demand plus target-stock replenishment.
 
 Important implications:
 
 - operators do not create manual print jobs
 - queue state is quantity-based
 - queue rows are aggregated by part/color/material
+- order-driven shortages are prioritized ahead of target-only replenishment
+- packing a sales order deducts inventory and closes its demand atomically
 
 ### Inventory history
 
@@ -233,6 +238,7 @@ Stock-changing actions must write to ledger tables:
 - `part_inventory_movements`
 - `finished_inventory_movements`
 - `print_events`
+- `sales_order_events` records the actor and lifecycle of each order
 
 Do not bypass these tables for convenience.
 
@@ -303,6 +309,6 @@ Remember:
 
 - JWT signature validation for Access identity
 - backup/export tooling for D1
-- demand-source model beyond target-stock replenishment
+- additional demand sources beyond manual sales orders and target-stock replenishment
 - R2-backed file and image uploads
 - Shopify order ingestion
