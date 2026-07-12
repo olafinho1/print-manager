@@ -125,7 +125,7 @@ import { buildDemandModel } from "./demand-model.js";
         requiresAssembly: true,
         imageRef: "",
         finishedStock: 3,
-        targetStock: 8,
+        targetStock: 0,
         notes: "Core always-on SKU.",
         partRequirements: [
           {
@@ -146,7 +146,7 @@ import { buildDemandModel } from "./demand-model.js";
         requiresAssembly: true,
         imageRef: "",
         finishedStock: 1,
-        targetStock: 6,
+        targetStock: 0,
         notes: "Usually grouped with the ivory PETG parts run.",
         partRequirements: [
           {
@@ -171,7 +171,7 @@ import { buildDemandModel } from "./demand-model.js";
         requiresAssembly: true,
         imageRef: "",
         finishedStock: 0,
-        targetStock: 5,
+        targetStock: 0,
         notes: "Blocked mostly by PETG clip inventory.",
         partRequirements: [
           {
@@ -825,8 +825,8 @@ import { buildDemandModel } from "./demand-model.js";
                   <div class="detail__value">${formatNumber(product.totalSellableNow)}</div>
                 </div>
                 <div>
-                  <p class="detail__label">Target stock</p>
-                  <div class="detail__value">${formatNumber(product.targetStock)}</div>
+                  <p class="detail__label">Open order demand</p>
+                  <div class="detail__value">${formatNumber(product.currentSalesDemand)}</div>
                 </div>
                 <div>
                   <p class="detail__label">Print time / unit</p>
@@ -956,14 +956,14 @@ import { buildDemandModel } from "./demand-model.js";
         </article>
       `,
       "No additional product-driven print demand is currently calculated.",
-      "The queue is generated automatically from open orders and target-stock replenishment.",
+      "The queue is generated automatically from unfulfilled sales orders.",
     );
 
     dom.queueSnapshot.innerHTML = renderList(
       computed.productionQueue,
       (row) => renderQueueCard(row, true),
       "Nothing needs printing right now.",
-      "Open orders and target-stock gaps populate the queue automatically.",
+      "Open orders populate the queue automatically when available stock cannot cover them.",
     );
 
     dom.completedPrints.innerHTML = renderList(
@@ -1210,7 +1210,6 @@ import { buildDemandModel } from "./demand-model.js";
     setInputValue(dom.productForm, "name", draft.name);
     setInputValue(dom.productForm, "sku", draft.sku);
     setInputValue(dom.productForm, "finishedStock", draft.finishedStock);
-    setInputValue(dom.productForm, "targetStock", draft.targetStock);
     setCheckboxValue(dom.productForm, "active", draft.active);
     setCheckboxValue(dom.productForm, "requiresAssembly", draft.requiresAssembly);
     setInputValue(dom.productForm, "imageRef", draft.imageRef);
@@ -1346,16 +1345,8 @@ import { buildDemandModel } from "./demand-model.js";
               <span class="stat__label">${product.requiresAssembly ? "Ready from parts" : "Printed stock"}</span>
               <div class="stat__value">${formatNumber(product.buildableNow)}</div>
             </div>
-            <div class="stat">
-              <span class="stat__label">Target stock</span>
-              <div class="stat__value">${formatNumber(product.targetStock)}</div>
-            </div>
-            <div class="stat">
-              <span class="stat__label">Gap to target</span>
-              <div class="stat__value">${formatNumber(product.targetGap)}</div>
-            </div>
             <div class="stat stat--gap">
-              <span class="stat__label">Current sales demand</span>
+              <span class="stat__label">Open order demand</span>
               <div class="stat__value">${formatNumber(product.currentSalesDemand)}</div>
             </div>
             <div class="stat">
@@ -1543,7 +1534,7 @@ import { buildDemandModel } from "./demand-model.js";
         <div class="detail-card__head">
           <div>
             <h3>Automatic production queue</h3>
-            <p class="helper-text">Open sales orders and active product target stock drive the queue automatically.</p>
+            <p class="helper-text">Unfulfilled sales orders are the only source of production demand.</p>
           </div>
           <span class="badge badge--active">${formatNumber(computed.productionQueue.length)} rows</span>
         </div>
@@ -1600,13 +1591,13 @@ import { buildDemandModel } from "./demand-model.js";
       computed.productionQueue,
       (row) => renderQueueCard(row, false),
       "Nothing needs printing right now.",
-      "Open orders and active product target-stock gaps populate this queue automatically.",
+      "Open orders populate this queue when current stock cannot cover their product requirements.",
     );
   }
 
   function renderQueueCard(row, compact) {
     const sourceList = row.sources
-      .map((source) => `${source.sourceType === "sales_order" ? "Order" : "Target"} · ${source.productName}: ${formatNumber(source.quantity)}`)
+      .map((source) => `Order · ${source.productName}: ${formatNumber(source.quantity)}`)
       .join(" · ");
 
     return `
@@ -1628,14 +1619,6 @@ import { buildDemandModel } from "./demand-model.js";
           <div>
             <p class="detail__label">Order demand</p>
             <div class="detail__value">${formatNumber(row.orderRequiredQty)}</div>
-          </div>
-          <div>
-            <p class="detail__label">Target demand</p>
-            <div class="detail__value">${formatNumber(row.targetRequiredQty)}</div>
-          </div>
-          <div>
-            <p class="detail__label">Total required</p>
-            <div class="detail__value">${formatNumber(row.requiredQty)}</div>
           </div>
           <div>
             <p class="detail__label">Print time / part</p>
@@ -1755,8 +1738,8 @@ import { buildDemandModel } from "./demand-model.js";
         return;
       }
 
-      if (payload.finishedStock < 0 || payload.targetStock < 0) {
-        window.alert("Finished stock and target stock must be zero or greater.");
+      if (payload.finishedStock < 0) {
+        window.alert("Finished stock must be zero or greater.");
         return;
       }
 
@@ -2446,9 +2429,7 @@ import { buildDemandModel } from "./demand-model.js";
           updatedAt: printState.updatedAt,
           sources: demand?.sources || [],
           orderRequiredQty: demand?.orderRequiredQty || 0,
-          targetRequiredQty: demand?.targetRequiredQty || 0,
           orderShortageQty: demand?.orderShortageQty || 0,
-          targetShortageQty: demand?.targetShortageQty || 0,
           oldestOrderDate: demand?.oldestOrderDate || "",
           priority,
           priorityClass:
@@ -2464,7 +2445,7 @@ import { buildDemandModel } from "./demand-model.js";
               ? `No active printer is loaded for ${part.color} / ${part.material}`
               : blockingProducts > 0
               ? `${blockingProducts} active product${blockingProducts === 1 ? "" : "s"} blocked right now`
-              : "Needed to reach active product target stock",
+              : "Existing queue tracking remains after order demand was fulfilled",
         };
       })
       .filter(Boolean)
@@ -2713,7 +2694,6 @@ import { buildDemandModel } from "./demand-model.js";
         shortage: Math.max(requirement.quantity - requirement.available, 0),
       }))
       .filter((requirement) => requirement.shortage > 0);
-    const targetGap = Math.max(product.targetStock - product.finishedStock, 0);
     const onHandNow = product.requiresAssembly ? product.finishedStock : buildableNow;
     const printTimeMinutes = requirements.reduce(
       (sum, requirement) => sum + requirement.quantity * requirement.printTimeMinutes,
@@ -2726,12 +2706,10 @@ import { buildDemandModel } from "./demand-model.js";
       buildableNow,
       missingForNextUnit,
       onHandNow,
-      targetGap,
       printTimeMinutes,
       totalSellableNow: product.requiresAssembly ? product.finishedStock + buildableNow : buildableNow,
       currentSalesDemand: demand.salesDemand || 0,
       salesUnitsToProduce: demand.salesUnitsToProduce || 0,
-      targetUnitsToProduce: demand.targetUnitsToProduce || 0,
     };
   }
 
@@ -2762,7 +2740,6 @@ import { buildDemandModel } from "./demand-model.js";
       name: dom.productForm.elements.name.value.trim(),
       sku: dom.productForm.elements.sku.value.trim(),
       finishedStock: dom.productForm.elements.finishedStock.value,
-      targetStock: dom.productForm.elements.targetStock.value,
       active: dom.productForm.elements.active.checked,
       requiresAssembly: dom.productForm.elements.requiresAssembly.checked,
       imageRef: dom.productForm.elements.imageRef.value.trim(),
@@ -2841,7 +2818,7 @@ import { buildDemandModel } from "./demand-model.js";
       active: Boolean(product.active),
       requiresAssembly,
       finishedStock: requiresAssembly ? toNonNegativeInteger(product.finishedStock) : 0,
-      targetStock: toNonNegativeInteger(product.targetStock),
+      targetStock: 0,
       imageRef: product.imageRef || "",
       notes: product.notes,
       partRequirements: requiresAssembly

@@ -221,15 +221,15 @@ For direct single-part products:
 
 ### Queue
 
-The print queue is derived automatically from open sales-order demand plus target-stock replenishment.
+The print queue is derived automatically from unfulfilled sales-order demand.
 
 Important implications:
 
 - operators do not create manual print jobs
 - queue state is quantity-based
 - queue rows are aggregated by part/color/material
-- order-driven shortages are prioritized ahead of target-only replenishment
 - packing a sales order deducts inventory and closes its demand atomically
+- the legacy `target_stock` column remains for schema compatibility but is normalized to zero and ignored
 
 ### Inventory history
 
@@ -309,6 +309,6 @@ Remember:
 
 - JWT signature validation for Access identity
 - backup/export tooling for D1
-- additional demand sources beyond manual sales orders and target-stock replenishment
+- optional demand sources beyond manual sales orders
 - R2-backed file and image uploads
 - Shopify order ingestion

@@ -89,5 +89,5 @@ Then open the local URL Vite prints, which is typically `http://localhost:5173`.
 - `Restore sample data` resets the app to a seeded dataset for testing the workflow.
 - Completing a print job automatically adds that quantity into part inventory.
 - Assembling a product automatically deducts required parts and increases finished stock.
-- Open sales orders add demand to the derived print queue; packing an order deducts the correct finished or direct-part stock and records the actor.
+- Unfulfilled sales orders are the sole source of derived print demand; packing an order deducts the correct finished or direct-part stock and records the actor.
 - Queue timing is estimated from active printers whose loaded color and material match the required queue rows.

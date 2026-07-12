@@ -98,7 +98,7 @@ export const SEED_STATE = {
       requiresAssembly: true,
       imageRef: "",
       finishedStock: 3,
-      targetStock: 8,
+      targetStock: 0,
       notes: "Core always-on SKU.",
       partRequirements: [
         {
@@ -119,7 +119,7 @@ export const SEED_STATE = {
       requiresAssembly: true,
       imageRef: "",
       finishedStock: 1,
-      targetStock: 6,
+      targetStock: 0,
       notes: "Usually grouped with the ivory PETG parts run.",
       partRequirements: [
         {
@@ -144,7 +144,7 @@ export const SEED_STATE = {
       requiresAssembly: true,
       imageRef: "",
       finishedStock: 0,
-      targetStock: 5,
+      targetStock: 0,
       notes: "Blocked mostly by PETG clip inventory.",
       partRequirements: [
         {
@@ -1627,7 +1627,7 @@ export function normalizeProduct(product) {
     active: Boolean(product?.active),
     requiresAssembly,
     finishedStock: requiresAssembly ? toNonNegativeInteger(product?.finishedStock) : 0,
-    targetStock: toNonNegativeInteger(product?.targetStock),
+    targetStock: 0,
     imageRef: String(product?.imageRef || ""),
     notes: String(product?.notes || ""),
     partRequirements: requiresAssembly
@@ -1907,7 +1907,6 @@ function summarizeProduct(product, partsById) {
     requirements,
     buildableNow,
     onHandNow: product.requiresAssembly ? product.finishedStock : buildableNow,
-    targetGap: Math.max(product.targetStock - product.finishedStock, 0),
   };
 }
 

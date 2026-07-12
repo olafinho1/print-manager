@@ -31,19 +31,12 @@ export function buildDemandModel({ parts = [], products = [], salesOrders = [] }
     const salesUnitsToProduce = product.requiresAssembly
       ? Math.max(salesDemand - finishedStock, 0)
       : salesDemand;
-    const stockAfterSales = product.requiresAssembly ? Math.max(finishedStock - salesDemand, 0) : 0;
-    const targetUnitsToProduce = product.active
-      ? product.requiresAssembly
-        ? Math.max(toInteger(product.targetStock) - stockAfterSales, 0)
-        : toInteger(product.targetStock)
-      : 0;
 
     const productDemand = {
       productId: product.id,
       salesDemand,
       salesUnitsToProduce,
-      targetUnitsToProduce,
-      totalUnitsToProduce: salesUnitsToProduce + targetUnitsToProduce,
+      totalUnitsToProduce: salesUnitsToProduce,
       oldestOrderDate: oldestOrderDateByProductId.get(product.id) || "",
     };
     productDemandById.set(product.id, productDemand);
@@ -56,14 +49,11 @@ export function buildDemandModel({ parts = [], products = [], salesOrders = [] }
       const existing = rawPartDemandById.get(requirement.partId) || {
         partId: requirement.partId,
         orderRequiredQty: 0,
-        targetRequiredQty: 0,
         sources: [],
         oldestOrderDate: "",
       };
       const orderQuantity = salesUnitsToProduce * perUnit;
-      const targetQuantity = targetUnitsToProduce * perUnit;
       existing.orderRequiredQty += orderQuantity;
-      existing.targetRequiredQty += targetQuantity;
       if (orderQuantity > 0) {
         existing.sources.push({
           sourceType: "sales_order",
@@ -76,14 +66,6 @@ export function buildDemandModel({ parts = [], products = [], salesOrders = [] }
           existing.oldestOrderDate = orderDate;
         }
       }
-      if (targetQuantity > 0) {
-        existing.sources.push({
-          sourceType: "target_stock",
-          productId: product.id,
-          productName: product.name,
-          quantity: targetQuantity,
-        });
-      }
       rawPartDemandById.set(requirement.partId, existing);
     });
   });
@@ -93,22 +75,18 @@ export function buildDemandModel({ parts = [], products = [], salesOrders = [] }
     const raw = rawPartDemandById.get(part.id) || {
       partId: part.id,
       orderRequiredQty: 0,
-      targetRequiredQty: 0,
       sources: [],
       oldestOrderDate: "",
     };
     const inventoryQty = toInteger(part.inventoryQty);
     const inventoryForOrders = Math.min(inventoryQty, raw.orderRequiredQty);
-    const inventoryAfterOrders = Math.max(inventoryQty - inventoryForOrders, 0);
     const orderShortageQty = Math.max(raw.orderRequiredQty - inventoryForOrders, 0);
-    const targetShortageQty = Math.max(raw.targetRequiredQty - inventoryAfterOrders, 0);
 
     partDemandById.set(part.id, {
       ...raw,
-      requiredQty: raw.orderRequiredQty + raw.targetRequiredQty,
+      requiredQty: raw.orderRequiredQty,
       orderShortageQty,
-      targetShortageQty,
-      shortageQty: orderShortageQty + targetShortageQty,
+      shortageQty: orderShortageQty,
     });
   });
 

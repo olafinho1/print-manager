@@ -13,7 +13,7 @@ const assemblyProduct = {
   partRequirements: [{ partId: "body", quantity: 2 }],
 };
 
-test("open sales demand is added while finished stock is reserved before target stock", () => {
+test("open sales demand is reduced by finished stock before parts are requested", () => {
   const model = buildDemandModel({
     parts: [{ id: "body", inventoryQty: 4 }],
     products: [assemblyProduct],
@@ -30,16 +30,14 @@ test("open sales demand is added while finished stock is reserved before target 
     productId: "assembled",
     salesDemand: 5,
     salesUnitsToProduce: 2,
-    targetUnitsToProduce: 8,
-    totalUnitsToProduce: 10,
+    totalUnitsToProduce: 2,
     oldestOrderDate: "2026-07-12",
   });
-  assert.equal(model.partDemandById.get("body").requiredQty, 20);
+  assert.equal(model.partDemandById.get("body").requiredQty, 4);
   assert.equal(model.partDemandById.get("body").orderShortageQty, 0);
-  assert.equal(model.partDemandById.get("body").targetShortageQty, 16);
 });
 
-test("packing an assembled order preserves the replenishment requirement", () => {
+test("packing a stock-covered assembled order leaves no production demand", () => {
   const before = buildDemandModel({
     parts: [{ id: "body", inventoryQty: 0 }],
     products: [assemblyProduct],
@@ -51,11 +49,11 @@ test("packing an assembled order preserves the replenishment requirement", () =>
     salesOrders: [{ status: "packed", orderDate: "2026-07-12", items: [{ productId: "assembled", quantity: 2, fulfilledQuantity: 2 }] }],
   });
 
-  assert.equal(before.partDemandById.get("body").shortageQty, 14);
-  assert.equal(after.partDemandById.get("body").shortageQty, 14);
+  assert.equal(before.partDemandById.get("body").shortageQty, 0);
+  assert.equal(after.partDemandById.get("body").shortageQty, 0);
 });
 
-test("direct products use part inventory for orders first and targets second", () => {
+test("direct products use part inventory only against open order demand", () => {
   const model = buildDemandModel({
     parts: [{ id: "direct-part", inventoryQty: 3 }],
     products: [
@@ -73,12 +71,11 @@ test("direct products use part inventory for orders first and targets second", (
   const demand = model.partDemandById.get("direct-part");
 
   assert.equal(demand.orderRequiredQty, 5);
-  assert.equal(demand.targetRequiredQty, 4);
   assert.equal(demand.orderShortageQty, 2);
-  assert.equal(demand.targetShortageQty, 4);
+  assert.equal(demand.shortageQty, 2);
 });
 
-test("open orders remain demand for inactive products while their targets do not", () => {
+test("open orders remain demand for inactive products", () => {
   const model = buildDemandModel({
     parts: [{ id: "body", inventoryQty: 0 }],
     products: [{ ...assemblyProduct, active: false, finishedStock: 0 }],
@@ -90,6 +87,17 @@ test("open orders remain demand for inactive products while their targets do not
   });
 
   assert.equal(model.productDemandById.get("assembled").salesDemand, 2);
-  assert.equal(model.productDemandById.get("assembled").targetUnitsToProduce, 0);
   assert.equal(model.partDemandById.get("body").requiredQty, 4);
+});
+
+test("legacy target-stock values never create demand", () => {
+  const model = buildDemandModel({
+    parts: [{ id: "body", inventoryQty: 0 }],
+    products: [{ ...assemblyProduct, finishedStock: 0, targetStock: 999 }],
+    salesOrders: [],
+  });
+
+  assert.equal(model.productDemandById.get("assembled").salesDemand, 0);
+  assert.equal(model.partDemandById.get("body").requiredQty, 0);
+  assert.equal(model.partDemandById.get("body").shortageQty, 0);
 });
