@@ -113,7 +113,7 @@ Each PR owns a separate Direct Upload Pages project and D1 database named `print
 ### One-time setup
 
 1. Create a Cloudflare API token scoped to this account with **Account / Cloudflare Pages / Edit** and **Account / D1 / Edit**. Keep the token in GitHub Secrets; never commit it.
-2. Add repository Actions secrets `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` under **Settings → Secrets and variables → Actions**. Find the account ID in Cloudflare's account overview. These are build-time secrets, not app runtime bindings.
+2. Add repository Actions secrets `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` under **Settings → Secrets and variables → Actions**. In Cloudflare, select the project's account, press **Cmd/Ctrl + K**, and choose **Copy account ID**. These are build-time secrets, not app runtime bindings.
 3. Enable GitHub Actions for this repository. The workflow requests `contents: read`, `pull-requests: read`, and `deployments: write` for its temporary GitHub token.
 4. In the production Pages project's **Builds & deployments → Branch control**, disable native Git preview builds to avoid duplicate previews. The explicit empty `[env.preview].d1_databases` in `wrangler.toml` also prevents future native preview builds of this branch from inheriting production D1. Existing native deployments are unaffected by a config edit.
 
@@ -128,6 +128,8 @@ Cloudflare references: [CI Direct Upload](https://developers.cloudflare.com/page
 - **Close/merge:** remove the Pages project and its deployments, then delete its D1. Verify both are gone and mark GitHub preview deployments inactive. Reopening creates fresh resources and sample data.
 
 Runs for one PR are serialized without canceling the running job. The script reads the current PR state before acting: stale revisions skip deployment, and an already closed PR triggers cleanup. Resource creation/deletion can be retried after partial failures. Seed inserts use `INSERT OR IGNORE`, so a failed first import can resume without resetting existing rows. Cleanup refuses a mismatched project/database and leaves D1 intact if deleting the serving project fails.
+
+A freshly created hostname can briefly fail HTTPS requests while Cloudflare activates its certificate. The smoke check retries before marking the deployment ready. If it still fails, the error includes the network/TLS error code; rerunning the workflow preserves the already seeded database.
 
 The seed uses the app's sample-data serializer with only inserts retained. It includes assembly and direct products, synthetic sales orders, and 250 g of each sample filament so ordering warnings are easy to exercise. It never imports production state. The advanced-mode `_worker.js` bundle packages the existing Pages Functions alongside the Vite assets, allowing deployment from an isolated directory/config.
 
