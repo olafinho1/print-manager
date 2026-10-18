@@ -11,7 +11,7 @@ function appFixture() {
   const source = readFileSync(new URL("../app.js", import.meta.url), "utf8")
     .replace(/^import .*;$/gm, "")
     .replace("  init();", "")
-    .replace(/\}\)\(\);\s*$/, "return { ui, state, dom, renderFilamentOrdering, renderQueueActionPreview, queueActionLimit, normalizeRemoteState, replaceStateInMemory, computeState, renderQueueCard, buildFilamentActivityEntries, filterActivityEntries }; })();");
+    .replace(/\}\)\(\);\s*$/, "return { ui, state, dom, applyRemoteMeta, renderHeader, renderFilamentOrdering, renderQueueActionPreview, queueActionLimit, normalizeRemoteState, replaceStateInMemory, computeState, renderQueueCard, buildFilamentActivityEntries, filterActivityEntries }; })();");
   const app = runInNewContext(source, {
     buildDemandModel, ...filamentModel,
     window: { location: { hostname: "localhost" }, sessionStorage: { getItem: () => null } },
@@ -156,4 +156,16 @@ test("whole-roll suggestions use exact decimal accounting and include deficits w
   const deficit = filamentModel.filamentOrderingNeeds([{ ...filament, stockGrams: -10.01 }], []);
   assert.equal(deficit[0].shortageGrams, 10.01);
   assert.equal(deficit[0].rollsToOrder, 2);
+});
+
+
+test("preview snapshot metadata survives frontend normalization and appears in the header", () => {
+  const app = appFixture();
+  app.applyRemoteMeta({ auth: { authenticated: true, email: "operator@example.com" },
+    app: { environment: "preview", previewDataSource: "production snapshot", previewSnapshotAt: "2026-10-18T20:00:00.000Z" } });
+  app.dom.signedInUser = {};
+  app.renderHeader();
+  assert.equal(app.ui.appMeta.previewSnapshotAt, "2026-10-18T20:00:00.000Z");
+  assert.match(app.dom.signedInUser.textContent, /Preview environment · production snapshot from/);
+  assert.match(app.dom.signedInUser.textContent, /operator@example.com/);
 });

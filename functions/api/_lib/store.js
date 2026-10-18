@@ -1878,6 +1878,8 @@ export function getRequestMeta(context) {
       environment: isLocal ? "local" : String(context.env.APP_ENV || "production"),
       canRestoreSampleData: allowSampleReset,
       hostname: url.hostname,
+      previewDataSource: isLocal ? "" : String(context.env.PREVIEW_DATA_SOURCE || ""),
+      previewSnapshotAt: isLocal ? "" : String(context.env.PREVIEW_SNAPSHOT_AT || ""),
     },
   };
 }

@@ -64,7 +64,7 @@ Then open the Wrangler local URL, typically `http://127.0.0.1:8788`.
 
 ## Pull request previews
 
-The **Cloudflare PR preview** GitHub Actions workflow creates a separate Pages project and D1 database for each same-repository PR. It applies migrations, seeds synthetic test data once, and publishes the preview URL in the PR's deployments and workflow summary. Updates migrate and redeploy while keeping test data. Closing or merging the PR deletes its preview and database; reopening creates a fresh environment.
+The **Cloudflare PR preview** GitHub Actions workflow creates a separate Pages project and D1 database for each same-repository PR. It protects the preview with Cloudflare Access, clones production D1 once, applies feature migrations to that copy, and publishes the preview URL in the PR's deployments and workflow summary. Updates migrate and redeploy while keeping test data. Closing or merging the PR deletes its preview and database; reopening creates a fresh production snapshot.
 
 Configure the `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` Actions secrets first. See [preview setup and testing](DEVELOPMENT.md#pull-request-preview-environments) for permissions and a full lifecycle trial.
 

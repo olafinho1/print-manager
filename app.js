@@ -699,7 +699,7 @@ import { gramsToMilligrams, filamentLabel, printerMatchesFilament, consumptionQu
           ? "Local development session"
           : "Authentication not detected";
       dom.signedInUser.textContent = ui.appMeta.environment === "preview"
-        ? `Preview environment · test data${ui.currentUser.authenticated ? ` · ${identity}` : ""}`
+        ? `Preview environment · ${ui.appMeta.previewDataSource || "test data"}${ui.appMeta.previewSnapshotAt ? ` from ${new Date(ui.appMeta.previewSnapshotAt).toLocaleString()}` : ""}${ui.currentUser.authenticated ? ` · ${identity}` : ""}`
         : identity;
     }
 
@@ -3216,6 +3216,8 @@ import { gramsToMilligrams, filamentLabel, printerMatchesFilament, consumptionQu
       environment: "local",
       canRestoreSampleData: true,
       hostname: window.location.hostname,
+      previewDataSource: "",
+      previewSnapshotAt: "",
     };
   }
 
@@ -3263,6 +3265,8 @@ import { gramsToMilligrams, filamentLabel, printerMatchesFilament, consumptionQu
         environment: String(meta?.app?.environment || "local"),
         canRestoreSampleData: meta?.app?.canRestoreSampleData !== false,
         hostname: String(meta?.app?.hostname || window.location.hostname),
+        previewDataSource: String(meta?.app?.previewDataSource || ""),
+        previewSnapshotAt: String(meta?.app?.previewSnapshotAt || ""),
       },
     };
   }

@@ -106,40 +106,40 @@ Cloudflare deploy model:
 
 ## Pull request preview environments
 
-`.github/workflows/pr-preview.yml` runs `scripts/preview.mjs` for same-repository PRs on `opened`, `reopened`, `synchronize`, and `closed`. Fork PRs never receive Cloudflare credentials. The workflow tests and builds the PR's head commit before deployment.
+`.github/workflows/pr-preview.yml` runs `scripts/preview.mjs` for same-repository PRs on `opened`, `reopened`, `synchronize`, and `closed`. Fork PRs never receive Cloudflare credentials. The workflow tests and builds the PR's head commit before deployment. Treat same-repository branches as trusted: their workflow code runs with account credentials. Do not copy untrusted contributions into such branches and run this workflow.
 
-Each PR owns a separate Direct Upload Pages project and D1 database named `print-manager-pr-<number>-<repository hash>`. Pages has only production/preview binding scopes, so separate projects avoid different PRs sharing or overwriting a database binding. The main production project and database are not used by this workflow. The script checks project ownership markers, exact database names, and the production database IDs before acting.
+Each PR owns a Direct Upload Pages project, D1 database, and Access application named `print-manager-pr-<number>-<repository hash>`. The production database is used only as the export source. Imports, migrations, application requests, and cleanup target the isolated PR database. Guards check project ownership, exact database names, and production database IDs before writing or deleting anything.
 
 ### One-time setup
 
-1. Create a Cloudflare API token scoped to this account with **Account / Cloudflare Pages / Edit** and **Account / D1 / Edit**. Keep the token in GitHub Secrets; never commit it.
-2. Add repository Actions secrets `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` under **Settings → Secrets and variables → Actions**. In Cloudflare, select the project's account, press **Cmd/Ctrl + K**, and choose **Copy account ID**. These are build-time secrets, not app runtime bindings.
-3. Enable GitHub Actions for this repository. The workflow requests `contents: read`, `pull-requests: read`, and `deployments: write` for its temporary GitHub token.
-4. In the production Pages project's **Builds & deployments → Branch control**, disable native Git preview builds to avoid duplicate previews. The explicit empty `[env.preview].d1_databases` in `wrangler.toml` also prevents future native preview builds of this branch from inheriting production D1. Existing native deployments are unaffected by a config edit.
+1. Give the Cloudflare API token these account permissions: **Cloudflare Pages / Edit**, **D1 / Edit**, and **Access: Apps and Policies / Edit**. Keep the token in GitHub Secrets.
+2. Add repository Actions secrets `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` under **Settings → Secrets and variables → Actions**. The workflow does not put these credentials in the deployed app.
+3. The workflow finds the production Access application through the production Pages project's custom domain. If this is ambiguous, set the Actions **variable** `CLOUDFLARE_ACCESS_SOURCE_APP_ID` to that application's ID. It copies the production login policies and identity-provider restrictions to the PR's own Access application. Bypass policies are rejected. The production Access application is never edited.
+4. Enable GitHub Actions. The workflow requests `contents: read`, `pull-requests: read`, and `deployments: write` for GitHub's temporary token.
+5. Disable native Git preview builds in the production Pages project's **Builds & deployments → Branch control** to avoid duplicate previews. The empty `[env.preview].d1_databases` in `wrangler.toml` prevents native previews from inheriting production D1. Existing deployments are unaffected by a config edit.
 
-The generated preview config binds only that PR's D1 and sets `APP_ENV=preview` and `ALLOW_SAMPLE_RESET=false`. The header identifies the app as a test environment. The preview is a public `pages.dev` site with synthetic data; the custom production domain's Access policy does not automatically cover it. Use synthetic data when testing.
-
-Cloudflare references: [CI Direct Upload](https://developers.cloudflare.com/pages/how-to/use-direct-upload-with-continuous-integration/), [Pages configuration environments](https://developers.cloudflare.com/pages/functions/wrangler-configuration/), and [D1 migrations](https://developers.cloudflare.com/d1/reference/migrations/).
+The Access application covers both `<project>.pages.dev` and `*.<project>.pages.dev`, including branch aliases and historical deployment URLs. Before exporting production, the workflow deploys a maintenance worker with no D1 binding and verifies unauthenticated requests redirect to Cloudflare Access. Missing permissions or failed protection checks stop the copy. Access applications are removed only after the serving project and D1 have been deleted.
 
 ### Lifecycle
 
-- **Open/reopen:** create or recover the PR's resources, run every pending migration with `wrangler d1 migrations apply`, seed sample parts/products/printers/filaments and open sales orders, compile Pages Functions, deploy, and smoke-test `/api/state` and its metadata. GitHub shows the preview link as a deployment and in the Actions run summary.
-- **Update:** reuse the same D1, apply only pending migration files, and deploy the new head. A `preview_seed` marker prevents reseeding. Operator changes made during testing remain intact. Add new numbered migration files; editing an already applied file will not rerun it.
-- **Close/merge:** remove the Pages project and its deployments, then delete its D1. Verify both are gone and mark GitHub preview deployments inactive. Reopening creates fresh resources and sample data.
+- **Open/reopen:** provision Access and isolated resources, export production schema and data, import into the empty PR D1, apply pending feature migrations, validate the app read model against the copy, and deploy. The header and workflow summary show the snapshot timestamp. The source is the production D1 ID in `wrangler.toml`.
+- **Update:** keep the existing copy and operator test changes; apply pending migrations and redeploy. A `preview_production_snapshot` marker prevents another export/import. Add numbered migration files instead of editing an applied migration.
+- **Close/merge:** delete Pages and its deployments, then D1, then the PR Access application. Mark GitHub preview deployments inactive. Reopening takes a fresh copy. Preview data is never copied back into production on merge.
 
-Runs for one PR are serialized without canceling the running job. The script reads the current PR state before acting: stale revisions skip deployment, and an already closed PR triggers cleanup. Resource creation/deletion can be retried after partial failures. Seed inserts use `INSERT OR IGNORE`, so a failed first import can resume without resetting existing rows. Cleanup refuses a mismatched project/database and leaves D1 intact if deleting the serving project fails.
+The SQL import happens **before** migrations so the preview tests a real production upgrade. A full D1 export retains history and internal application records omitted by the bounded `/api/state` read model. Production's migration tracking table is retained when present. Older production installations without tracking use the existing repeatable migrations; future migrations must account for which schema production actually has.
 
-A freshly created hostname can briefly fail HTTPS requests while Cloudflare activates its certificate. The smoke check retries before marking the deployment ready. If it still fails, the error includes the network/TLS error code; rerunning the workflow preserves the already seeded database.
+Cloudflare D1 currently implements this copy through SQL export/import. **An export blocks other production database requests while it runs.** A snapshot is taken once per PR environment, not on every update. SQL stays in a private temporary directory outside the deploy bundle, command output is suppressed for export/import, and the directory is removed on success or failure. The workflow never publishes the dump as an artifact. An empty production database remains empty rather than receiving sample data.
 
-The seed uses the app's sample-data serializer with only inserts retained. It includes assembly and direct products, synthetic sales orders, and 250 g of each sample filament so ordering warnings are easy to exercise. It never imports production state. The advanced-mode `_worker.js` bundle packages the existing Pages Functions alongside the Vite assets, allowing deployment from an isolated directory/config.
+Runs for one PR are serialized without cancellation. A completed snapshot is retained even if migration or deployment subsequently fails. An interrupted initial import has no completion marker, so its serving project and incomplete D1 are removed and recreated before retrying. The first run upgrading an old sample-data preview also replaces that synthetic database once. Existing local development data is unaffected.
+
+The maintenance worker remains in place if initialization fails. After import and migration, the workflow exercises the real state serializer through the isolated D1 API without logging row contents. Deployment checks verify Access on the project root, branch alias, and deployment URL. These checks do not bypass login or claim an authenticated browser/API smoke test; finish acceptance testing after signing in. New Pages hostnames may need several minutes for DNS/TLS and Access propagation.
 
 ### Test the cycle
 
-1. Open a PR and wait for **Cloudflare PR preview** to pass. Open its deployment URL and confirm the **Preview environment · test data** header, open sales orders, and filament ordering overview.
-2. Receive a roll or adjust stock with an operator name. Verify activity includes the actor and timestamp. Exercise Complete prints, assembly, and direct-product packing.
-3. Push another commit. Verify the preview updates, the database is unchanged, the stock adjustment remains, and the Actions summary says **preserved**. For a schema change, add a new migration and confirm it is applied before deployment.
-4. Close the PR. Confirm the cleanup run succeeds, the GitHub deployment is inactive, and both the Pages project and D1 are absent in Cloudflare.
-5. Reopen the PR if testing should continue; it receives newly seeded data.
+1. Open a PR and wait for **Cloudflare PR preview**. Sign in at its deployment URL and confirm **Preview environment · production snapshot from …**. Compare representative inventory, orders, queue state, and history with production as of the snapshot time.
+2. Exercise stock adjustments, Complete prints, assembly, and direct-product packing in the preview. Verify actor and timestamp history. Legacy parts start without filament configuration if production predates that feature.
+3. Push another commit. Confirm the snapshot timestamp and test changes remain. Add a new migration to test schema upgrades.
+4. Close the PR and confirm its Pages project, D1, and Access application are gone. Reopen it to obtain a fresh snapshot.
 
 Local validation without Cloudflare credentials:
 
@@ -149,9 +149,11 @@ npm run build
 node scripts/preview.mjs build
 ```
 
-The last command compiles the same deployable worker/assets into ignored `.preview/local-build`. Lifecycle tests cover resource isolation, retries, deletion order, seed preservation, real SQL migrations, and environment smoke checks.
+Tests cover resource isolation, retries, deletion order, snapshot preservation, legacy production upgrades with full history and in-progress work, empty snapshots, Access policies, and refusal to expose public data. The build command compiles the deployable worker/assets into ignored `.preview/local-build`.
 
-If provisioning or cleanup fails, inspect the Actions error, correct the token permissions or resource conflict, and rerun the failed job. Rerunning an old deployment after closing a PR performs cleanup using the current PR state. A failed seed is retried; a completed seed is never reset. GitHub does not trigger `pull_request` workflows for some conflicted PR states, and disabling Actions prevents cleanup; in those cases, rerun an existing job after resolving the condition or remove only that PR's named project and database in Cloudflare. Do not use the production migration command to repair a preview.
+If a workflow fails, correct the reported permission or resource issue and rerun it. An old run checks current PR state before acting; closed PRs trigger cleanup. GitHub does not trigger `pull_request` workflows for some conflicted PR states, and disabling Actions prevents cleanup. Resolve the condition and rerun, or remove only that PR's named resources. Never use the production migration command to repair a preview.
+
+References: [D1 export/import and limitations](https://developers.cloudflare.com/d1/best-practices/import-export-data/), [D1 migrations](https://developers.cloudflare.com/d1/reference/migrations/), [Pages Access](https://developers.cloudflare.com/pages/configuration/preview-deployments/), [CI Direct Upload](https://developers.cloudflare.com/pages/how-to/use-direct-upload-with-continuous-integration/).
 
 ## Production Pages configuration
 

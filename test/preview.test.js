@@ -1,11 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readFileSync } from "node:fs";
-import { TestD1 } from "./helpers/d1.js";
-import { readState } from "../functions/api/_lib/store.js";
 import {
-  previewIdentity, previewVars, previewConfig, previewSeedSql, createCloudflareClient,
-  ensurePreviewResources, destroyPreviewResources, seedPreviewOnce, verifyPreview,
+  previewIdentity, previewVars, previewConfig, createCloudflareClient,
+  ensurePreviewResources, destroyPreviewResources,
 } from "../scripts/preview.mjs";
 
 const productionId = "ebe1b46e-e722-44ea-ab21-5e309be0c7c0";
@@ -113,53 +110,9 @@ test("failed deletion retains the serving database and cleanup can resume after 
   assert.equal(resources.database, null);
 });
 
-test("seeding only runs once and retries a failed first seed", async () => {
-  const { api, resources } = cloudflareFixture();
-  const database = await ensurePreviewResources(api, identity, [productionId], "2026-05-04");
-  await assert.rejects(seedPreviewOnce(api, database, identity, [productionId], async () => { throw new Error("seed failed"); }), /seed failed/);
-  let calls = 0;
-  const seed = async () => { calls++; resources.seeded = true; };
-  assert.equal(await seedPreviewOnce(api, database, identity, [productionId], seed), true);
-  assert.equal(await seedPreviewOnce(api, database, identity, [productionId], seed), false);
-  assert.equal(calls, 1);
-});
-
-test("real migrations and synthetic seed include both product workflows and preserve edited data on replay", async (t) => {
-  const db = new TestD1(); t.after(() => db.close());
-  for (const name of ["0001_initial", "0002_inventory_ledger", "0003_sales_orders", "0004_filaments", "0005_completion_filament"]) {
-    db.sqlite.exec(readFileSync(new URL(`../migrations/${name}.sql`, import.meta.url), "utf8"));
-  }
-  db.sqlite.exec("CREATE TABLE preview_seed (id INTEGER PRIMARY KEY)");
-  const seed = await previewSeedSql();
-  assert.doesNotMatch(seed, /DELETE FROM|UPDATE .* SET/);
-  db.sqlite.exec(seed);
-  const state = await readState(db);
-  assert(state.parts.length && state.filaments.length && state.printers.length);
-  assert(state.products.some((product) => product.active && !product.requiresAssembly));
-  assert(state.products.some((product) => product.active && product.requiresAssembly));
-  assert(state.salesOrders.length > 0);
-  assert(state.salesOrderEvents.every((event) => event.actor === "Preview seed"));
-  db.sqlite.exec("UPDATE filaments SET stock_mg = 123450 WHERE id = 'sample-filament-pla-blue'");
-  db.sqlite.exec(seed);
-  assert.equal((await readState(db)).filaments.find((filament) => filament.id === "sample-filament-pla-blue").stockGrams, 123.45);
-  assert.equal((await readState(db)).salesOrders.length, state.salesOrders.length);
-});
-
 test("API errors never masquerade as missing resources", async () => {
   const error = createCloudflareClient("a".repeat(32), "token", async () => new Response(JSON.stringify({ success: false, errors: [{ message: "Unauthorized" }] }), { status: 403 }));
   await assert.rejects(error("/pages/projects/test", { allowMissing: true }), /Unauthorized/);
   const missing = createCloudflareClient("a".repeat(32), "token", async () => new Response("", { status: 404 }));
   assert.equal(await missing("/pages/projects/test", { allowMissing: true }), null);
-});
-
-test("preview verification rejects production metadata and tolerates deployment propagation", async () => {
-  let calls = 0;
-  const state = { parts: [], filaments: [], salesOrders: [], meta: { auth: {}, app: { environment: "preview" } } };
-  await verifyPreview("https://test.pages.dev", async () => {
-    if (++calls === 1) throw new Error("not propagated");
-    return Response.json(state);
-  }, async () => {});
-  assert.equal(calls, 2);
-  state.meta.app.environment = "production";
-  await assert.rejects(verifyPreview("https://test.pages.dev", async () => Response.json(state), async () => {}), /metadata is invalid/);
 });

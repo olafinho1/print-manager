@@ -3,7 +3,8 @@ import { appendFile, cp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { resolve, join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { SEED_STATE, replaceState } from "../functions/api/_lib/store.js";
+import { ensurePreviewAccess, destroyPreviewAccess, verifyAccess } from "./preview-access.mjs";
+import { snapshotStatus, cloneProductionDatabase, verifySnapshotState } from "./preview-snapshot.mjs";
 
 export function previewIdentity(repository, number) {
   if (!/^[\w.-]+\/[\w.-]+$/.test(repository || "") || !/^[1-9]\d*$/.test(String(number))) {
@@ -15,8 +16,9 @@ export function previewIdentity(repository, number) {
   return { name, repository, number: String(number), branch: `pr-${number}`, environment: `preview-pr-${number}` };
 }
 
-export function previewVars(identity) {
-  return { APP_ENV: "preview", ALLOW_SAMPLE_RESET: "false", PREVIEW_REPOSITORY: identity.repository, PREVIEW_PR: identity.number };
+export function previewVars(identity, snapshot = null) {
+  return { APP_ENV: "preview", ALLOW_SAMPLE_RESET: "false", PREVIEW_REPOSITORY: identity.repository, PREVIEW_PR: identity.number,
+    PREVIEW_DATA_SOURCE: "production snapshot", PREVIEW_SNAPSHOT_AT: snapshot?.copied_at || "" };
 }
 
 export function assertOwnedProject(project, identity) {
@@ -104,72 +106,23 @@ export async function destroyPreviewResources(api, identity, protectedIds) {
   }
 }
 
-function sqlLiteral(value) {
-  if (value === null) return "NULL";
-  if (typeof value === "number" && Number.isFinite(value)) return String(value);
-  if (typeof value === "string") return `'${value.replaceAll("'", "''")}'`;
-  throw new Error("Unsupported seed value.");
-}
-
-export async function previewSeedSql() {
-  const statements = [];
-  // Reuse the real restore serializer, retaining only inserts. A retry never
-  // deletes or overwrites operator-entered test data.
-  const collector = {
-    prepare(sql) { return { bind(...params) { return { sql, params }; } }; },
-    async exec() {},
-    async batch(batch) { statements.push(...batch); },
-  };
-  const sample = structuredClone(SEED_STATE);
-  const timestamp = new Date().toISOString();
-  for (const product of sample.products) if (!product.requiresAssembly) product.active = true;
-  sample.salesOrders = sample.products.filter((product) => product.active).map((product, index) => ({
-    id: `preview-order-${index + 1}`, orderNumber: `TEST-${index + 1}`, orderDate: timestamp.slice(0, 10),
-    status: "open", createdAt: timestamp, updatedAt: timestamp, createdBy: "Preview seed", updatedBy: "Preview seed",
-    items: [{ productId: product.id, quantity: 12 }],
-  }));
-  sample.salesOrderEvents = sample.salesOrders.map((order) => ({
-    id: `preview-created-${order.id}`, orderId: order.id, action: "created", actor: "Preview seed", createdAt: timestamp,
-    note: "Synthetic order for preview testing.",
-  }));
-  for (const filament of sample.filaments) filament.stockGrams = 250;
-  for (const movement of sample.filamentInventoryMovements) movement.deltaGrams = 250;
-  await replaceState(collector, sample);
-  return statements.filter(({ sql }) => /^\s*INSERT INTO /i.test(sql)).map(({ sql, params }) => {
-    let index = 0;
-    const literal = sql.replace(/^\s*INSERT INTO /i, "INSERT OR IGNORE INTO ").replace(/\?/g, () => sqlLiteral(params[index++]));
-    if (index !== params.length) throw new Error("Seed parameter mismatch.");
-    return `${literal};`;
-  }).join("\n") + "\nINSERT OR IGNORE INTO preview_seed (id) VALUES (1);\n";
-}
-
-export function previewConfig(identity, database, compatibilityDate, root) {
+export function previewConfig(identity, database, compatibilityDate, root, snapshot = null) {
   return {
     name: identity.name, compatibility_date: compatibilityDate, pages_build_output_dir: "./dist",
-    vars: previewVars(identity),
+    vars: previewVars(identity, snapshot),
     d1_databases: [{ binding: "DB", database_name: identity.name, database_id: database.uuid, migrations_dir: join(root, "migrations") }],
   };
 }
 
-export async function runWrangler(args, { cwd = process.cwd(), root = process.cwd() } = {}) {
-  console.log(`wrangler ${args.join(" ")}`);
+export async function runWrangler(args, { cwd = process.cwd(), root = process.cwd(), quiet = false } = {}) {
+  if (!quiet) console.log(`wrangler ${args.join(" ")}`);
   await new Promise((resolveRun, reject) => {
     const child = spawn(process.execPath, [join(root, "node_modules/wrangler/bin/wrangler.js"), ...args], {
-      cwd, stdio: "inherit", env: { ...process.env, CI: "true", WRANGLER_SEND_METRICS: "false" },
+      cwd, stdio: quiet ? "ignore" : "inherit", env: { ...process.env, CI: "true", WRANGLER_SEND_METRICS: "false", ...(quiet ? { WRANGLER_LOG: "none" } : {}) },
     });
     child.on("error", reject);
-    child.on("exit", (code) => code === 0 ? resolveRun() : reject(new Error(`Wrangler exited with code ${code}.`)));
+    child.on("exit", (code) => code === 0 ? resolveRun() : reject(new Error(`Wrangler ${args.slice(0, 2).join(" ")} exited with code ${code}${quiet ? "; private output suppressed" : ""}.`)));
   });
-}
-
-export async function seedPreviewOnce(api, database, identity, protectedIds, seed) {
-  assertPreviewDatabase(database, identity, protectedIds);
-  const query = (sql) => api(`/d1/database/${database.uuid}/query`, { method: "POST", body: { sql } });
-  await query("CREATE TABLE IF NOT EXISTS preview_seed (id INTEGER PRIMARY KEY CHECK (id = 1))");
-  const result = await query("SELECT id FROM preview_seed WHERE id = 1");
-  if (result[0]?.results?.length) return false;
-  await seed();
-  return true;
 }
 
 export async function buildPreviewBundle(stage, compatibilityDate, root = process.cwd()) {
@@ -177,24 +130,6 @@ export async function buildPreviewBundle(stage, compatibilityDate, root = proces
   await cp(join(root, "dist"), join(stage, "dist"), { recursive: true });
   await runWrangler(["pages", "functions", "build", "functions", "--outdir", join(stage, "dist/_worker.js"),
     "--output-routes-path", join(stage, "dist/_routes.json"), "--compatibility-date", compatibilityDate], { root });
-}
-
-export async function verifyPreview(url, fetchImpl = fetch, pause = (ms) => new Promise((done) => setTimeout(done, ms))) {
-  let lastError;
-  // A newly created Pages project's DNS/TLS certificate can lag its deployment.
-  for (let attempt = 0; attempt < 30; attempt++) {
-    try {
-      const response = await fetchImpl(`${url}/api/state`, { redirect: "error", signal: AbortSignal.timeout(10000) });
-      const state = await response.json();
-      if (!response.ok || state.meta?.app?.environment !== "preview" || !state.meta?.auth ||
-          !Array.isArray(state.parts) || !Array.isArray(state.filaments) || !Array.isArray(state.salesOrders)) {
-        throw new Error("Preview state or environment metadata is invalid.");
-      }
-      return;
-    } catch (error) { lastError = error; }
-    if (attempt < 29) await pause(10000);
-  }
-  throw new Error(`Preview smoke check failed: ${lastError?.message}${lastError?.cause?.code ? ` (${lastError.cause.code})` : ""}`);
 }
 
 async function github(path, { method = "GET", body } = {}) {
@@ -231,8 +166,9 @@ async function main() {
   const root = process.cwd();
   const baseConfig = await readFile(join(root, "wrangler.toml"), "utf8");
   const compatibilityDate = baseConfig.match(/^compatibility_date\s*=\s*"([\d-]+)"/m)?.[1];
+  const productionProject = baseConfig.match(/^name\s*=\s*"([^"]+)"/m)?.[1];
   const protectedIds = [...baseConfig.matchAll(/^database_id\s*=\s*"([^"]+)"/gm)].map((match) => match[1]);
-  if (!compatibilityDate || !protectedIds.length) throw new Error("Cannot identify the production configuration; refusing preview operations.");
+  if (!compatibilityDate || !productionProject || protectedIds.length !== 1) throw new Error("Cannot identify the production configuration; refusing preview operations.");
   if (process.argv[2] === "build") {
     await buildPreviewBundle(resolve(".preview/local-build"), compatibilityDate);
     return;
@@ -246,6 +182,7 @@ async function main() {
   const api = createCloudflareClient(process.env.CLOUDFLARE_ACCOUNT_ID, process.env.CLOUDFLARE_API_TOKEN);
   if (pr.state === "closed") {
     await destroyPreviewResources(api, identity, protectedIds);
+    await destroyPreviewAccess(api, identity);
     await deactivateDeployments(identity);
     await appendFile(process.env.GITHUB_STEP_SUMMARY, `### Preview removed\n\nPR #${identity.number}: Pages project and D1 \`${identity.name}\` are deleted.\n`);
     return;
@@ -254,28 +191,54 @@ async function main() {
     console.log("Skipping stale PR event; the latest PR run owns this preview.");
     return;
   }
-  const database = await ensurePreviewResources(api, identity, protectedIds, compatibilityDate);
+  // Configure Access first: existing sample previews are public until this succeeds.
+  await ensurePreviewAccess(api, identity, productionProject, process.env.CLOUDFLARE_ACCESS_SOURCE_APP_ID);
+  let database = await ensurePreviewResources(api, identity, protectedIds, compatibilityDate);
+  const sourceId = protectedIds[0];
+  let status = await snapshotStatus(api, database.uuid, sourceId);
+  if (status.dirty) {
+    // A legacy sample seed or interrupted import has no completed snapshot marker.
+    // Remove its serving app before its database, then retry with an empty D1.
+    await destroyPreviewResources(api, identity, protectedIds);
+    database = await ensurePreviewResources(api, identity, protectedIds, compatibilityDate);
+    status = await snapshotStatus(api, database.uuid, sourceId);
+  }
   const stage = resolve(".preview", identity.name);
   await mkdir(stage, { recursive: true });
   const configPath = join(stage, "wrangler.json");
   await writeFile(configPath, JSON.stringify(previewConfig(identity, database, compatibilityDate, root), null, 2));
+  const urls = [`https://${identity.name}.pages.dev`, `https://${identity.branch}.${identity.name}.pages.dev`];
+  if (!status.snapshot) {
+    // Establish Pages DNS/TLS using a maintenance worker with no database binding.
+    // It cannot expose or seed data while the clone and migrations are running.
+    const bootstrap = join(stage, "bootstrap");
+    await mkdir(join(bootstrap, "dist"), { recursive: true });
+    await writeFile(join(bootstrap, "wrangler.json"), JSON.stringify({ name: identity.name,
+      compatibility_date: compatibilityDate, pages_build_output_dir: "./dist", d1_databases: [], vars: previewVars(identity) }));
+    await writeFile(join(bootstrap, "dist/_worker.js"), 'export default { fetch() { return new Response("Preparing preview database. Please try again shortly.", { status: 503 }); } };');
+    await runWrangler(["pages", "deploy", "dist", "--project-name", identity.name, "--branch", identity.branch,
+      "--commit-hash", pr.head.sha, "--commit-message", "Preparing production snapshot", "--commit-dirty=true"], { cwd: bootstrap, root });
+    await verifyAccess([...urls, `https://access-check.${identity.name}.pages.dev`]);
+    status.snapshot = await cloneProductionDatabase({ sourceId, database, identity, protectedIds, compatibilityDate,
+      targetConfig: configPath, runWrangler, assertPreviewDatabase });
+    const verified = await snapshotStatus(api, database.uuid, sourceId);
+    if (!verified.snapshot) throw new Error("Production snapshot import was not completed. Retry this workflow.");
+  }
+  const config = previewConfig(identity, database, compatibilityDate, root, status.snapshot);
+  await writeFile(configPath, JSON.stringify(config, null, 2));
   await runWrangler(["d1", "migrations", "apply", identity.name, "--remote", "--config", configPath]);
-  const seeded = await seedPreviewOnce(api, database, identity, protectedIds, async () => {
-    const seedPath = join(stage, "seed.sql");
-    await writeFile(seedPath, await previewSeedSql());
-    await runWrangler(["d1", "execute", identity.name, "--remote", "--config", configPath, "--file", seedPath, "--yes"]);
-  });
+  await verifySnapshotState(api, database, identity, protectedIds, assertPreviewDatabase, config.vars);
   await buildPreviewBundle(stage, compatibilityDate);
   await runWrangler(["pages", "deploy", "dist", "--project-name", identity.name, "--branch", identity.branch,
     "--commit-hash", pr.head.sha, "--commit-message", `PR ${identity.number} preview`, "--commit-dirty=true"], { cwd: stage, root });
   const deployments = await api(`/pages/projects/${identity.name}/deployments?env=preview`);
   const deployment = deployments.find((entry) => entry.deployment_trigger?.metadata?.commit_hash === pr.head.sha && entry.deployment_trigger?.metadata?.branch === identity.branch);
   if (!deployment?.url) throw new Error("Cannot locate the uploaded preview deployment.");
-  await verifyPreview(deployment.url);
+  await verifyAccess([...urls, deployment.url]);
   const alias = `https://${identity.branch}.${identity.name}.pages.dev`;
   const url = deployment.aliases?.includes(alias) ? alias : deployment.url;
   await recordDeployment(identity, pr.head.sha, url);
-  await appendFile(process.env.GITHUB_STEP_SUMMARY, `### PR preview ready\n\n[Open preview](${url})\n\n- Commit: \`${pr.head.sha}\`\n- Pages project and D1: \`${identity.name}\`\n- Test data: ${seeded ? "seeded" : "preserved"}\n- State and environment smoke check: passed\n\nSample data only. Updates preserve this database; closing the PR deletes it.\n`);
+  await appendFile(process.env.GITHUB_STEP_SUMMARY, `### PR preview ready\n\n[Open preview](${url})\n\n- Commit: \`${pr.head.sha}\`\n- Pages project and D1: \`${identity.name}\`\n- Production snapshot: ${status.snapshot.copied_at}\n- Migrated state and Access checks: passed\n\nIsolated production copy. Updates preserve this database; closing the PR deletes it.\n`);
   console.log(`Preview ready: ${url}`);
 }
 
