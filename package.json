@@ -8,9 +8,9 @@
     "dev:cf": "wrangler pages dev",
     "build": "vite build",
     "preview": "vite preview",
-    "db:migrate:local": "wrangler d1 execute print-manager --local --file=./migrations/0001_initial.sql && wrangler d1 execute print-manager --local --file=./migrations/0002_inventory_ledger.sql && wrangler d1 execute print-manager --local --file=./migrations/0003_sales_orders.sql",
-    "db:migrate:remote": "wrangler d1 execute print-manager --remote --file=./migrations/0001_initial.sql && wrangler d1 execute print-manager --remote --file=./migrations/0002_inventory_ledger.sql && wrangler d1 execute print-manager --remote --file=./migrations/0003_sales_orders.sql",
-    "test": "node --test"
+    "db:migrate:local": "wrangler d1 execute print-manager --local --file=./migrations/0001_initial.sql && wrangler d1 execute print-manager --local --file=./migrations/0002_inventory_ledger.sql && wrangler d1 execute print-manager --local --file=./migrations/0003_sales_orders.sql && wrangler d1 execute print-manager --local --file=./migrations/0004_filaments.sql && wrangler d1 execute print-manager --local --file=./migrations/0005_completion_filament.sql",
+    "db:migrate:remote": "wrangler d1 execute print-manager --remote --file=./migrations/0001_initial.sql && wrangler d1 execute print-manager --remote --file=./migrations/0002_inventory_ledger.sql && wrangler d1 execute print-manager --remote --file=./migrations/0003_sales_orders.sql && wrangler d1 execute print-manager --remote --file=./migrations/0004_filaments.sql && wrangler d1 execute print-manager --remote --file=./migrations/0005_completion_filament.sql",
+    "test": "node --test test/*.test.js"
   },
   "devDependencies": {
     "vite": "^6.3.5",

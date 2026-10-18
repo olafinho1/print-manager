@@ -1,8 +1,12 @@
 import { buildDemandModel } from "./demand-model.js";
+import { gramsToMilligrams, filamentLabel, printerMatchesFilament, consumptionQuantity, futureFilamentDemand, filamentOrderingNeeds, addSampleFilaments } from "./filament-model.js";
 
 (() => {
   const STATE_API_URL = "/api/state";
   const API_ENDPOINTS = {
+    filaments: "/api/filaments",
+    filamentsDelete: "/api/filaments-delete",
+    filamentInventory: "/api/filaments-inventory",
     parts: "/api/parts",
     partsDelete: "/api/parts-delete",
     partsInventory: "/api/parts-inventory",
@@ -271,7 +275,14 @@ import { buildDemandModel } from "./demand-model.js";
     salesOrderEvents: [],
   };
 
+  addSampleFilaments(seedState);
+
   const ui = {
+    filamentDraft: blankFilamentDraft(),
+    filamentStockDraft: blankFilamentStockDraft(),
+    pendingMutations: new Map(),
+    saving: false,
+    queueActionDraft: null,
     activeTab: "sales",
     partFormDraft: blankPartDraft(),
     productFormDraft: blankProductDraft(),
@@ -315,7 +326,22 @@ import { buildDemandModel } from "./demand-model.js";
 
   function getDom() {
     return {
+      queueDialog: document.querySelector("#queue-action-dialog"),
+      queueActionForm: document.querySelector("#queue-action-form"),
+      queueActionPreview: document.querySelector("#queue-action-preview"),
+      queueActionError: document.querySelector("#queue-action-error"),
+      filamentForm: document.querySelector("#filament-form"),
+      filamentStockForm: document.querySelector("#filament-stock-form"),
+      filamentsList: document.querySelector("#filaments-list"),
+      filamentsCount: document.querySelector("#filaments-count"),
+      filamentsActivity: document.querySelector("#filaments-activity"),
+      filamentsActivityToolbar: document.querySelector("#filaments-activity-toolbar"),
       summaryCards: document.querySelector("#summary-cards"),
+      filamentOrderAlert: document.querySelector("#filament-order-alert"),
+      filamentOrderPanel: document.querySelector("#filament-order-panel"),
+      filamentOrderCount: document.querySelector("#filament-order-count"),
+      filamentOrderSetup: document.querySelector("#filament-order-setup"),
+      filamentOrderList: document.querySelector("#filament-order-list"),
       operatorName: document.querySelector("#operator-name"),
       operatorLabel: document.querySelector("#operator-label"),
       signedInUser: document.querySelector("#signed-in-user"),
@@ -356,6 +382,7 @@ import { buildDemandModel } from "./demand-model.js";
       requirementsCopy: document.querySelector("#product-requirements-section .subhead__copy"),
       restoreSampleData: document.querySelector("#restore-sample-data"),
       views: {
+        filaments: document.querySelector("#filaments-view"),
         sales: document.querySelector("#sales-view"),
         dashboard: document.querySelector("#dashboard-view"),
         parts: document.querySelector("#parts-view"),
@@ -370,6 +397,26 @@ import { buildDemandModel } from "./demand-model.js";
   function bindEvents() {
     document.addEventListener("click", handleClick);
     document.addEventListener("change", handleGlobalChange);
+
+    dom.queueActionForm.addEventListener("submit", handleQueueActionSubmit);
+    dom.queueActionForm.addEventListener("input", renderQueueActionPreview);
+    dom.queueDialog.addEventListener("cancel", (event) => { if (ui.saving) event.preventDefault(); });
+    dom.queueDialog.addEventListener("close", () => {
+      ui.queueActionDraft = null;
+      render();
+    });
+
+    dom.filamentForm.addEventListener("input", () => { ui.filamentDraft = readFilamentForm(); });
+    dom.filamentForm.addEventListener("submit", handleFilamentSubmit);
+    dom.filamentStockForm.addEventListener("input", () => { ui.filamentStockDraft = readFilamentStockForm(); });
+    dom.filamentStockForm.addEventListener("change", (event) => {
+      ui.filamentStockDraft = readFilamentStockForm();
+      if (event.target.name === "filamentId") {
+        ui.filamentStockDraft.expectedStockVersion = state.filaments.find((f) => f.id === event.target.value)?.stockVersion || 0;
+      }
+      renderFilamentStockForm();
+    });
+    dom.filamentStockForm.addEventListener("submit", handleFilamentStockSubmit);
 
     dom.partForm.addEventListener("input", () => {
       ui.partFormDraft = readPartForm();
@@ -430,6 +477,7 @@ import { buildDemandModel } from "./demand-model.js";
   }
 
   async function handleClick(event) {
+    if (ui.saving) return;
     const target = event.target.closest("[data-action], [data-tab], #restore-sample-data");
     if (!target) {
       return;
@@ -459,6 +507,37 @@ import { buildDemandModel } from "./demand-model.js";
 
     try {
       switch (action) {
+        case "view-filament-orders":
+          ui.activeTab = "dashboard";
+          render();
+          dom.filamentOrderPanel.scrollIntoView({ behavior: "smooth", block: "start" });
+          break;
+        case "cancel-queue-action":
+          dom.queueDialog.close();
+          break;
+        case "edit-filament":
+          ui.filamentDraft = { ...blankFilamentDraft(), ...state.filaments.find((f) => f.id === id) };
+          renderFilaments(ui.lastComputed);
+          dom.filamentForm.scrollIntoView({ behavior: "smooth", block: "start" });
+          break;
+        case "cancel-filament-edit":
+          ui.filamentDraft = blankFilamentDraft();
+          renderFilaments(ui.lastComputed);
+          break;
+        case "filament-stock":
+          ui.filamentStockDraft = { ...blankFilamentStockDraft(), filamentId: id, expectedStockVersion: state.filaments.find((f) => f.id === id)?.stockVersion || 0 };
+          ui.activeTab = "filaments";
+          render();
+          dom.filamentStockForm.scrollIntoView({ behavior: "smooth", block: "center" });
+          break;
+        case "delete-filament":
+          if (window.confirm("Delete this filament? Entries with stock history or assignments cannot be deleted.")) {
+            await mutateState(API_ENDPOINTS.filamentsDelete, { id });
+            if (ui.filamentDraft.id === id) ui.filamentDraft = blankFilamentDraft();
+            if (ui.filamentStockDraft.filamentId === id) ui.filamentStockDraft = blankFilamentStockDraft();
+            render();
+          }
+          break;
         case "cancel-part-edit":
           ui.partFormDraft = blankPartDraft();
           renderPartForm();
@@ -593,6 +672,7 @@ import { buildDemandModel } from "./demand-model.js";
     renderPartsList(computed);
     renderProductForm();
     renderProductsList(computed);
+    renderFilaments(computed);
     renderPrinterForm();
     renderPrintersList(computed);
     renderQueueSummary(computed);
@@ -783,7 +863,7 @@ import { buildDemandModel } from "./demand-model.js";
         valueLabel: computed.totalQueueParallelTimeLabel,
         detail: computed.unassignedQueueRowsCount
           ? `${formatNumber(computed.unassignedQueueRowsCount)} queue row${computed.unassignedQueueRowsCount === 1 ? " has" : "s have"} no active printer`
-          : "Estimated from current active color and material setups",
+          : "Estimated from active loaded filament setups",
       },
     ]
       .map(
@@ -799,6 +879,7 @@ import { buildDemandModel } from "./demand-model.js";
   }
 
   function renderDashboard(computed) {
+    renderFilamentOrdering(computed);
     dom.readyProducts.innerHTML = renderList(
       computed.readyToSell,
       (product) => {
@@ -1012,8 +1093,8 @@ import { buildDemandModel } from "./demand-model.js";
     setInputValue(dom.partForm, "id", draft.id);
     setInputValue(dom.partForm, "name", draft.name);
     setInputValue(dom.partForm, "sku", draft.sku);
-    setInputValue(dom.partForm, "color", draft.color);
-    setInputValue(dom.partForm, "material", draft.material);
+    renderFilamentSelect(dom.partForm.elements.filamentId, draft.filamentId);
+    setInputValue(dom.partForm, "filamentGramsPerUnit", draft.filamentGramsPerUnit ?? "");
     setInputValue(dom.partForm, "inventoryQty", draft.inventoryQty);
     setInputValue(dom.partForm, "minStock", draft.minStock);
     setInputValue(dom.partForm, "printTimeMinutes", draft.printTimeMinutes);
@@ -1063,6 +1144,7 @@ import { buildDemandModel } from "./demand-model.js";
               aria-label="View details for ${escapeHtml(part.name)}"
             >
               <h3>${escapeHtml(part.name)}</h3>
+              ${partFilamentMarkup(part)}
               <div class="part-summary-card__stats">
                 <div class="part-summary-stat">
                   <span class="part-summary-stat__label">Inventory</span>
@@ -1115,6 +1197,7 @@ import { buildDemandModel } from "./demand-model.js";
 
     return `
       <article class="entity-card part-detail-view">
+        ${partFilamentMarkup(part)}
         <div>
           <button class="button button--small button--ghost" data-action="close-part-detail" type="button">
             ← Back to all parts
@@ -1297,8 +1380,7 @@ import { buildDemandModel } from "./demand-model.js";
     setInputValue(dom.printerForm, "id", draft.id);
     setInputValue(dom.printerForm, "name", draft.name);
     setInputValue(dom.printerForm, "model", draft.model);
-    setInputValue(dom.printerForm, "color", draft.color);
-    setInputValue(dom.printerForm, "material", draft.material);
+    renderFilamentSelect(dom.printerForm.elements.filamentId, draft.filamentId, "No filament loaded");
     setCheckboxValue(dom.printerForm, "active", draft.active);
     setTextValue(dom.printerForm, "notes", draft.notes);
 
@@ -1462,6 +1544,7 @@ import { buildDemandModel } from "./demand-model.js";
             </span>
           </div>
 
+          <p class="helper-text ${printer.filamentId ? "" : "filament-warning"}">${escapeHtml(printer.filamentId ? filamentLabel(state.filaments.find((f) => f.id === printer.filamentId)) : `No filament assigned${printer.color || printer.material ? ` · Previous setup: ${printer.color} / ${printer.material}` : ""}`)}</p>
           <div class="chips">
             <span class="chip">${escapeHtml(printer.color)}</span>
             <span class="chip">${escapeHtml(printer.material)}</span>
@@ -1504,7 +1587,7 @@ import { buildDemandModel } from "./demand-model.js";
 
           ${
             printer.active
-              ? '<p class="helper-text">This printer is included in queue parallelization using its current color and material.</p>'
+              ? '<p class="helper-text">Active printers with a loaded filament are included in queue timing for that exact filament.</p>'
               : '<p class="helper-text">Inactive printers are excluded from queue timing until reactivated.</p>'
           }
 
@@ -1579,7 +1662,7 @@ import { buildDemandModel } from "./demand-model.js";
       </article>
       <article class="detail-card">
         <h3>How it works</h3>
-        <p class="helper-text">Plan reserves quantity, Start moves it into active printing, Complete adds printed parts into inventory, and Fail tracks unsuccessful quantity without removing the underlying demand. Parallel queue time uses the currently active printer color and material setups as an estimate.</p>
+        <p class="helper-text">Plan reserves quantity and Start moves it into active printing. Complete adds the quantity you enter to part inventory and deducts that quantity × the part's grams per unit from filament stock. Fail tracks unsuccessful quantity without deducting filament; record any wasted material as a filament stock adjustment. Retry does not deduct filament. Parallel time uses exact loaded filaments.</p>
       </article>
     `;
   }
@@ -1662,6 +1745,8 @@ import { buildDemandModel } from "./demand-model.js";
           </div>
         </div>
 
+        ${partFilamentMarkup(row.part)}
+        ${queueFilamentMarkup(row)}
         <p class="helper-text">${escapeHtml(row.reason)}</p>
         ${sourceList ? `<p class="helper-text">${escapeHtml(sourceList)}</p>` : ""}
         ${
@@ -1678,10 +1763,10 @@ import { buildDemandModel } from "./demand-model.js";
                 <button class="button button--small" data-action="queue-plan" data-part-id="${escapeHtml(row.part.id)}" type="button">
                   Plan
                 </button>
-                <button class="button button--small button--ghost" data-action="queue-start" data-part-id="${escapeHtml(row.part.id)}" type="button">
+                <button class="button button--small button--ghost" data-action="queue-start" data-part-id="${escapeHtml(row.part.id)}" type="button" ${hasFilamentSetup(row.part) ? "" : "disabled"}>
                   Start
                 </button>
-                <button class="button button--small button--secondary" data-action="queue-complete" data-part-id="${escapeHtml(row.part.id)}" type="button">
+                <button class="button button--small button--secondary" data-action="queue-complete" data-part-id="${escapeHtml(row.part.id)}" type="button" ${queueActionLimit(row, "complete") > 0 ? "" : "disabled"}>
                   Complete
                 </button>
                 <button class="button button--small button--ghost" data-action="queue-fail" data-part-id="${escapeHtml(row.part.id)}" type="button">
@@ -1703,13 +1788,251 @@ import { buildDemandModel } from "./demand-model.js";
     `;
   }
 
+  function blankFilamentDraft() {
+    return { id: "", manufacturer: "", material: "", color: "", spoolWeightGrams: 1000, initialRolls: 0, additionalGrams: 0 };
+  }
+
+  function renderFilamentOrdering(computed) {
+    const needs = filamentOrderingNeeds(state.filaments, computed.productionQueue);
+    const missingSetup = computed.productionQueue.filter((row) =>
+      row.pendingQty > (row.prepaidFilamentQty || 0) && !hasFilamentSetup(row.part));
+    const totalRolls = needs.reduce((sum, entry) => sum + entry.rollsToOrder, 0);
+    const needsAttention = needs.length > 0 || missingSetup.length > 0;
+
+    dom.filamentOrderAlert.hidden = !needsAttention;
+    dom.filamentOrderAlert.innerHTML = needsAttention ? `
+      <div>
+        <strong>${needs.length ? `Filament to order: ${formatNumber(totalRolls)} roll${totalRolls === 1 ? "" : "s"}` : "Filament demand needs setup"}</strong>
+        <p>${needs.length ? `${formatNumber(needs.length)} filament${needs.length === 1 ? " is" : "s are"} short for current work.` : ""}${missingSetup.length ? ` ${formatNumber(missingSetup.length)} queued part${missingSetup.length === 1 ? " needs" : "s need"} filament settings; the estimate is incomplete.` : ""}</p>
+      </div>
+      <button class="button button--small button--danger" data-action="view-filament-orders" type="button">Review on dashboard</button>` : "";
+    dom.filamentOrderPanel.classList.toggle("filament-order-panel--attention", needsAttention);
+    dom.filamentOrderCount.textContent = needs.length ? `${needs.length} short · ${totalRolls} suggested rolls` : missingSetup.length ? "Setup required" : "Stock covers the queue";
+    dom.filamentOrderSetup.innerHTML = missingSetup.length ? `
+      <div class="filament-order-setup">
+        <p class="filament-warning">Estimate incomplete: configure filament and grams per unit for these queued parts.</p>
+        <div class="card-actions">${missingSetup.map((row) => `<button class="button button--small button--ghost" data-action="edit-part" data-id="${escapeHtml(row.partId)}" type="button">Configure ${escapeHtml(row.part.name)}</button>`).join("")}</div>
+      </div>` : "";
+    dom.filamentOrderList.innerHTML = renderList(needs, ({ filament, neededGrams, shortageGrams, rollsToOrder }) => `
+      <article class="filament-order-row">
+        <div class="filament-order-row__identity">
+          <h3>${escapeHtml(filament.manufacturer)}</h3>
+          <p class="sku">${escapeHtml(filament.material)} · ${escapeHtml(filament.color)} · ${escapeHtml(formatGrams(filament.spoolWeightGrams))} / roll</p>
+        </div>
+        <dl class="filament-order-row__quantities">
+          <div><dt>Available</dt><dd class="${filament.stockGrams < 0 ? "filament-warning" : ""}">${escapeHtml(formatGrams(filament.stockGrams))}</dd></div>
+          <div><dt>Queue needs</dt><dd>${escapeHtml(formatGrams(neededGrams))}</dd></div>
+          <div><dt>Short by</dt><dd class="filament-warning">${escapeHtml(formatGrams(shortageGrams))}</dd></div>
+          <div class="filament-order-row__recommendation"><dt>Suggested order</dt><dd>${formatNumber(rollsToOrder)} roll${rollsToOrder === 1 ? "" : "s"}</dd></div>
+        </dl>
+        <button class="button button--small button--secondary" data-action="filament-stock" data-id="${escapeHtml(filament.id)}" type="button">Manage stock</button>
+      </article>`,
+    missingSetup.length ? "No shortages among configured filaments" : "No filament to order",
+    missingSetup.length ? "Configure the parts above to include all pending work." : "Current filament stock covers the queue. This updates as orders, completed prints, and stock balances change.");
+  }
+
+  function blankFilamentStockDraft() {
+    return { filamentId: "", action: "receive", rolls: 1, additionalGrams: 0, deltaGrams: "", note: "", expectedStockVersion: 0 };
+  }
+
+  function readFilamentForm() {
+    return Object.fromEntries(new FormData(dom.filamentForm));
+  }
+
+  function readFilamentStockForm() {
+    return { ...ui.filamentStockDraft, ...Object.fromEntries(new FormData(dom.filamentStockForm)) };
+  }
+
+  function renderFilamentSelect(select, value, emptyLabel = "Select a filament") {
+    select.innerHTML = `<option value="">${escapeHtml(emptyLabel)}</option>` + state.filaments.map((filament) =>
+      `<option value="${escapeHtml(filament.id)}">${escapeHtml(filamentLabel(filament))}</option>`).join("");
+    select.value = value || "";
+  }
+
+  function formatGrams(value) {
+    return `${new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 }).format(value)} g`;
+  }
+
+  function hasFilamentSetup(part) {
+    return Boolean(part.filamentId && gramsToMilligrams(part.filamentGramsPerUnit) > 0 && state.filaments.some((f) => f.id === part.filamentId));
+  }
+
+  function partFilamentMarkup(part) {
+    const filament = state.filaments.find((f) => f.id === part.filamentId);
+    return hasFilamentSetup(part)
+      ? `<p class="helper-text">${escapeHtml([filament.manufacturer, filament.material, filament.color].join(" · "))} · ${escapeHtml(formatGrams(part.filamentGramsPerUnit))} per unit</p>`
+      : `<p class="helper-text filament-warning">Filament setup required before starting or completing prints.${part.color || part.material ? ` Previous setup: ${escapeHtml(part.color)} / ${escapeHtml(part.material)}.` : ""}</p>`;
+  }
+
+  function queueFilamentMarkup(row) {
+    if (!hasFilamentSetup(row.part)) return "";
+    const filament = state.filaments.find((f) => f.id === row.part.filamentId);
+    const needed = futureFilamentDemand([row]).get(row.part.filamentId) || 0;
+    return `<p class="helper-text ${needed > filament.stockGrams ? "filament-warning" : ""}">Future filament: ${escapeHtml(formatGrams(needed))} · Available: ${escapeHtml(formatGrams(filament.stockGrams))}${needed > filament.stockGrams ? " · Insufficient stock; printing is still allowed." : ""}</p>`;
+  }
+
+  function renderFilamentStockForm() {
+    const draft = ui.filamentStockDraft;
+    const form = dom.filamentStockForm;
+    renderFilamentSelect(form.elements.filamentId, draft.filamentId);
+    for (const name of ["action", "rolls", "additionalGrams", "deltaGrams", "note"]) setInputValue(form, name, draft[name]);
+    for (const label of form.querySelectorAll("[data-stock-field]")) {
+      const name = label.dataset.stockField;
+      const visible = name === "rolls" ? draft.action !== "adjust" : name === "additionalGrams" ? draft.action === "set" : draft.action === "adjust";
+      label.hidden = !visible;
+      form.elements[name].disabled = !visible;
+      form.elements[name].required = visible;
+    }
+    form.elements.rolls.min = draft.action === "receive" ? "1" : "0";
+    form.elements.note.required = draft.action !== "receive";
+    form.querySelector('[type="submit"]').textContent = { receive: "Receive rolls", set: "Set counted stock", adjust: "Save adjustment" }[draft.action];
+    const filament = state.filaments.find((f) => f.id === draft.filamentId);
+    document.querySelector("#filament-stock-balance").textContent = filament ? `Current available balance: ${formatGrams(filament.stockGrams)}` : "Select a filament to update its stock.";
+  }
+
+  function renderFilaments(computed) {
+    const draft = ui.filamentDraft;
+    for (const name of ["id", "manufacturer", "material", "color", "spoolWeightGrams", "initialRolls", "additionalGrams"]) setInputValue(dom.filamentForm, name, draft[name]);
+    dom.filamentForm.querySelector('[type="submit"]').textContent = draft.id ? "Save filament" : "Add filament";
+    dom.filamentForm.querySelector('[data-action="cancel-filament-edit"]').hidden = !draft.id;
+    for (const label of dom.filamentForm.querySelectorAll("[data-opening-stock]")) {
+      label.hidden = Boolean(draft.id);
+      label.querySelector("input").disabled = Boolean(draft.id);
+    }
+    renderFilamentStockForm();
+    const demand = futureFilamentDemand(computed.productionQueue);
+    dom.filamentsCount.textContent = `${state.filaments.length} tracked`;
+    dom.filamentsList.innerHTML = renderList(state.filaments, (filament) => {
+      const needed = demand.get(filament.id) || 0;
+      return `<article class="entity-card">
+        <div class="entity-card__head"><div><h3>${escapeHtml(filament.manufacturer)}</h3><p class="sku">${escapeHtml(filament.material)} · ${escapeHtml(filament.color)} · ${escapeHtml(formatGrams(filament.spoolWeightGrams))} / roll</p></div>
+        ${filament.stockGrams < 0 ? '<span class="badge badge--inactive">Stock deficit</span>' : ""}</div>
+        <div class="stats-grid">
+          <div class="stat"><span class="stat__label">Available filament</span><div class="stat__value ${filament.stockGrams < 0 ? "filament-warning" : ""}">${escapeHtml(formatGrams(filament.stockGrams))}</div></div>
+          <div class="stat"><span class="stat__label">Roll equivalents</span><div class="stat__value">${new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 }).format(filament.stockGrams / filament.spoolWeightGrams)}</div></div>
+          <div class="stat"><span class="stat__label">Future queue demand</span><div class="stat__value">${escapeHtml(formatGrams(needed))}</div></div>
+        </div>
+        ${needed > filament.stockGrams ? `<p class="helper-text filament-warning">${escapeHtml(formatGrams(needed - filament.stockGrams))} short for future work. Receive stock or correct the balance; printing remains available.</p>` : ""}
+        <div class="card-actions">
+          <button class="button button--small" type="button" data-action="filament-stock" data-id="${escapeHtml(filament.id)}">Manage stock</button>
+          <button class="button button--small button--ghost" type="button" data-action="edit-filament" data-id="${escapeHtml(filament.id)}">Edit</button>
+          <button class="button button--small button--danger" type="button" data-action="delete-filament" data-id="${escapeHtml(filament.id)}">Delete</button>
+        </div></article>`;
+    }, "No filaments yet", "Add a manufacturer, material, color and spool weight, then count your stock.");
+    dom.filamentsActivity.innerHTML = renderList(filterActivityEntries(buildFilamentActivityEntries(), ui.activityFilters).slice(0, 40), renderActivityCard, "No filament activity", "Receipts, corrections and print consumption will appear here.");
+  }
+
+  function buildFilamentActivityEntries() {
+    return state.filamentInventoryMovements.map((entry) => {
+      const filament = state.filaments.find((f) => f.id === entry.filamentId);
+      return {
+        id: entry.id, entityId: entry.filamentId, title: filament ? filamentLabel(filament) : "Filament",
+        subtitle: "Filament inventory", scope: "filament", actionKey: entry.reason,
+        badgeLabel: `${entry.deltaGrams > 0 ? "+" : ""}${formatGrams(entry.deltaGrams)}`,
+        badgeClass: entry.deltaGrams >= 0 ? "badge--active" : "badge--inactive",
+        description: ({ opening_balance: "Opening filament balance", rolls_received: "Full rolls received", stock_count: "Stock count recorded", manual_adjustment: "Filament stock corrected", print_completed: "Filament consumed for completed prints", print_started: "Filament consumed at print start (previous policy)", direct_completion: "Filament consumed for directly completed units" })[entry.reason] || entry.reason,
+        note: entry.note, actor: entry.actor, timestamp: entry.createdAt,
+      };
+    }).sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+  }
+
+  async function handleFilamentSubmit(event) {
+    event.preventDefault();
+    if (ui.saving) return;
+    try {
+      const draft = readFilamentForm();
+      await mutateState(API_ENDPOINTS.filaments, { filament: draft, initialRolls: draft.initialRolls || 0, additionalGrams: draft.additionalGrams || 0 });
+      ui.filamentDraft = blankFilamentDraft();
+      render();
+    } catch (error) { handlePersistenceError(error); }
+  }
+
+  async function handleFilamentStockSubmit(event) {
+    event.preventDefault();
+    if (ui.saving) return;
+    try {
+      const draft = readFilamentStockForm();
+      await mutateState(API_ENDPOINTS.filamentInventory, draft);
+      ui.filamentStockDraft = { ...blankFilamentStockDraft(), filamentId: draft.filamentId, expectedStockVersion: state.filaments.find((f) => f.id === draft.filamentId)?.stockVersion || 0 };
+      render();
+    } catch (error) { handlePersistenceError(error); }
+  }
+
+  function queueActionLimit(row, action) {
+    return ({
+      plan: row.remainingQty,
+      start: hasFilamentSetup(row.part) ? row.plannedQty + row.remainingQty : 0,
+      complete: hasFilamentSetup(row.part) ? row.inProgressQty + row.plannedQty + row.remainingQty : row.prepaidFilamentQty || 0,
+      fail: row.inProgressQty,
+      retry: row.failedQty,
+    })[action] || 0;
+  }
+
+  function renderQueueActionPreview() {
+    if (!ui.queueActionDraft) return;
+    const { row, action } = ui.queueActionDraft;
+    const quantity = Number(dom.queueActionForm.elements.quantity.value);
+    const max = queueActionLimit(row, action);
+    dom.queueActionForm.elements.quantity.max = max;
+    const valid = Number.isSafeInteger(quantity) && quantity > 0 && quantity <= max;
+    dom.queueActionForm.querySelector('[type="submit"]').disabled = ui.saving || !valid;
+    if (!valid) {
+      dom.queueActionPreview.textContent = max > 0 ? `Enter a whole quantity from 1 to ${max}.` : "There is no eligible quantity for this action. Check part setup and queue state.";
+      return;
+    }
+    const consumed = consumptionQuantity(action, quantity, row.prepaidFilamentQty);
+    const prepaid = action === "complete" ? quantity - consumed : 0;
+    if (consumed > 0) {
+      const filament = state.filaments.find((f) => f.id === row.part.filamentId);
+      const mg = consumed * gramsToMilligrams(row.part.filamentGramsPerUnit);
+      const balance = (gramsToMilligrams(filament.stockGrams) - mg) / 1000;
+      dom.queueActionPreview.innerHTML = `<p class="helper-text">${escapeHtml(filamentLabel(filament))}</p>
+        <p><strong>${escapeHtml(formatGrams(mg / 1000))}</strong> will be deducted: ${consumed} completed unit${consumed === 1 ? "" : "s"} × ${escapeHtml(formatGrams(row.part.filamentGramsPerUnit))} per unit.</p>
+        ${prepaid > 0 ? `<p class="helper-text">${prepaid} unit${prepaid === 1 ? " was" : "s were"} already charged under the previous Start policy.</p>` : ""}
+        <p class="${balance < 0 ? "filament-warning" : "helper-text"}">Available afterward: ${escapeHtml(formatGrams(balance))}.${balance < 0 ? " Stock will be negative. You can continue and receive or correct stock afterward." : ""}</p>`;
+    } else {
+      dom.queueActionPreview.textContent = action === "fail"
+        ? "No filament is deducted for failed prints. Record wasted material with a filament stock adjustment."
+        : action === "retry" || action === "start" ? "No filament is deducted now. Filament usage is calculated from the quantity entered in Complete prints."
+        : action === "complete" ? "These units were already charged under the previous Start policy. No additional filament will be deducted."
+        : "Planning changes queue quantities without deducting filament.";
+    }
+  }
+
+  async function handleQueueActionSubmit(event) {
+    event.preventDefault();
+    if (ui.saving || !ui.queueActionDraft) return;
+    const { row, action } = ui.queueActionDraft;
+    const quantity = Number(dom.queueActionForm.elements.quantity.value);
+    if (!Number.isSafeInteger(quantity) || quantity <= 0 || quantity > queueActionLimit(row, action)) return;
+    dom.queueActionError.hidden = true;
+    try {
+      await mutateState(API_ENDPOINTS.queueActions, {
+        action, partId: row.partId, quantity, expectedQueueVersion: row.part.queueVersion || 0,
+        expectedFilamentId: row.part.filamentId, expectedFilamentGramsPerUnit: row.part.filamentGramsPerUnit,
+      });
+      dom.queueDialog.close();
+      render();
+    } catch (error) {
+      const latest = computeState().queueByPartId.get(row.partId);
+      ui.queueActionDraft = {
+        row: latest || { ...row, remainingQty: 0, plannedQty: 0, inProgressQty: 0, failedQty: 0 },
+        action,
+      };
+      renderQueueActionPreview();
+      dom.queueActionError.textContent = error instanceof Error ? error.message : "Unable to save. Please retry.";
+      dom.queueActionError.hidden = false;
+    }
+  }
+
   async function handlePartSubmit(event) {
     event.preventDefault();
+    if (ui.saving) return;
 
     try {
       const payload = normalizePart(readPartForm());
-      if (!payload.name || !payload.color || !payload.material) {
-        window.alert("Part name, color, and material are required.");
+      if (!payload.name || !payload.filamentId || !(gramsToMilligrams(payload.filamentGramsPerUnit) > 0)) {
+        window.alert("Part name, filament, and positive grams per unit are required.");
         return;
       }
 
@@ -1730,6 +2053,7 @@ import { buildDemandModel } from "./demand-model.js";
 
   async function handleProductSubmit(event) {
     event.preventDefault();
+    if (ui.saving) return;
 
     try {
       const payload = normalizeProduct(readProductForm());
@@ -1796,11 +2120,12 @@ import { buildDemandModel } from "./demand-model.js";
 
   async function handlePrinterSubmit(event) {
     event.preventDefault();
+    if (ui.saving) return;
 
     try {
       const payload = normalizePrinter(readPrinterForm());
-      if (!payload.name || !payload.color || !payload.material) {
-        window.alert("Printer name, loaded color, and loaded material are required.");
+      if (!payload.name) {
+        window.alert("Printer name is required.");
         return;
       }
 
@@ -1816,6 +2141,7 @@ import { buildDemandModel } from "./demand-model.js";
 
   async function handleSalesOrderSubmit(event) {
     event.preventDefault();
+    if (ui.saving) return;
     try {
       const payload = readSalesOrderForm();
       if (!payload.orderNumber || !payload.orderDate) {
@@ -2182,89 +2508,19 @@ import { buildDemandModel } from "./demand-model.js";
     render();
   }
 
-  async function updateQueueState(partId, action) {
-    const computed = computeState();
-    const row = computed.queueByPartId.get(partId);
-    if (!row) {
-      return;
-    }
-
-    if (action === "plan") {
-      if (row.remainingQty <= 0) {
-        window.alert("There is no unplanned quantity remaining for this part.");
-        return;
-      }
-      const quantity = promptForQuantity(`How many "${row.part.name}" units should be planned? Max ${row.remainingQty}.`, row.remainingQty);
-      if (quantity === null) {
-        return;
-      }
-      await mutateState(API_ENDPOINTS.queueActions, {
-        action,
-        partId,
-        quantity,
-      });
-    } else if (action === "start") {
-      const maxStart = row.plannedQty + row.remainingQty;
-      if (maxStart <= 0) {
-        window.alert("There is no quantity available to start for this part.");
-        return;
-      }
-      const quantity = promptForQuantity(`How many "${row.part.name}" units should start printing? Max ${maxStart}.`, maxStart);
-      if (quantity === null) {
-        return;
-      }
-      await mutateState(API_ENDPOINTS.queueActions, {
-        action,
-        partId,
-        quantity,
-      });
-    } else if (action === "complete") {
-      const maxComplete = row.inProgressQty + row.plannedQty + row.remainingQty;
-      if (maxComplete <= 0) {
-        window.alert("There is no quantity available to complete for this part.");
-        return;
-      }
-      const quantity = promptForQuantity(`How many "${row.part.name}" units were completed? Max ${maxComplete}.`, maxComplete);
-      if (quantity === null) {
-        return;
-      }
-      await mutateState(API_ENDPOINTS.queueActions, {
-        action,
-        partId,
-        quantity,
-      });
-    } else if (action === "fail") {
-      if (row.inProgressQty <= 0) {
-        window.alert("Only in-progress quantity can be marked as failed.");
-        return;
-      }
-      const quantity = promptForQuantity(`How many "${row.part.name}" units failed? Max ${row.inProgressQty}.`, row.inProgressQty);
-      if (quantity === null) {
-        return;
-      }
-      await mutateState(API_ENDPOINTS.queueActions, {
-        action,
-        partId,
-        quantity,
-      });
-    } else if (action === "retry") {
-      if (row.failedQty <= 0) {
-        window.alert("There is no failed quantity to retry.");
-        return;
-      }
-      const quantity = promptForQuantity(`How many failed "${row.part.name}" units should move back to planned? Max ${row.failedQty}.`, row.failedQty);
-      if (quantity === null) {
-        return;
-      }
-      await mutateState(API_ENDPOINTS.queueActions, {
-        action,
-        partId,
-        quantity,
-      });
-    } else {
-      return;
-    }
-    render();
+  function updateQueueState(partId, action) {
+    const row = computeState().queueByPartId.get(partId);
+    if (!row) return;
+    const labels = { plan: "Plan quantity", start: "Start printing", complete: "Complete prints", fail: "Record failed prints", retry: "Retry failed prints" };
+    ui.queueActionDraft = { row, action };
+    document.querySelector("#queue-action-title").textContent = labels[action];
+    document.querySelector("#queue-action-part").textContent = row.part.name;
+    dom.queueActionForm.querySelector('[type="submit"]').textContent = labels[action];
+    dom.queueActionForm.elements.quantity.value = Math.max(queueActionLimit(row, action), 1);
+    dom.queueActionError.hidden = true;
+    renderQueueActionPreview();
+    dom.queueDialog.showModal();
+    dom.queueActionForm.elements.quantity.select();
   }
 
   function computeState() {
@@ -2280,7 +2536,8 @@ import { buildDemandModel } from "./demand-model.js";
     );
     const activePrintersBySetupKey = new Map();
     activePrinters.forEach((printer) => {
-      const setupKey = getSetupKey(printer.color, printer.material);
+      if (!printer.filamentId) return;
+      const setupKey = printer.filamentId;
       const matchingPrinters = activePrintersBySetupKey.get(setupKey) || [];
       matchingPrinters.push(printer);
       activePrintersBySetupKey.set(setupKey, matchingPrinters);
@@ -2324,7 +2581,8 @@ import { buildDemandModel } from "./demand-model.js";
     const partActivityEntries = buildPartActivityEntries(state, partsById);
     const productActivityEntries = buildProductActivityEntries(state, new Map(products.map((product) => [product.id, product])));
     const salesActivityEntries = buildSalesActivityEntries(state);
-    const allActivityEntries = [...partActivityEntries, ...productActivityEntries, ...salesActivityEntries].sort(
+    const filamentActivityEntries = buildFilamentActivityEntries();
+    const allActivityEntries = [...partActivityEntries, ...productActivityEntries, ...salesActivityEntries, ...filamentActivityEntries].sort(
       (left, right) => new Date(right.timestamp).getTime() - new Date(left.timestamp).getTime(),
     );
     const filteredActivityEntries = filterActivityEntries(allActivityEntries, ui.activityFilters);
@@ -2393,7 +2651,7 @@ import { buildDemandModel } from "./demand-model.js";
         const inProgressPrintTimeMinutes = inProgressQty * part.printTimeMinutes;
         const remainingPrintTimeMinutes = remainingQty * part.printTimeMinutes;
         const pendingPrintTimeMinutes = pendingQty * part.printTimeMinutes;
-        const matchingPrinters = activePrintersBySetupKey.get(getSetupKey(part.color, part.material)) || [];
+        const matchingPrinters = activePrintersBySetupKey.get(part.filamentId) || [];
         const readyPrinterCount = matchingPrinters.length;
         const parallelTimeLabel =
           readyPrinterCount > 0 ? formatDurationMinutes(Math.ceil(pendingPrintTimeMinutes / readyPrinterCount)) : "No printer ready";
@@ -2415,6 +2673,7 @@ import { buildDemandModel } from "./demand-model.js";
           shortageQty,
           plannedQty,
           inProgressQty,
+          prepaidFilamentQty: printState.prepaidFilamentQty,
           failedQty,
           remainingQty,
           pendingQty,
@@ -2479,7 +2738,7 @@ import { buildDemandModel } from "./demand-model.js";
     productionQueue
       .filter((row) => row.pendingQty > 0)
       .forEach((row) => {
-        const setupKey = getSetupKey(row.part.color, row.part.material);
+        const setupKey = (row.part.filamentId || `unassigned:${row.part.id}`);
         const lane = setupLaneByKey.get(setupKey) || {
           setupKey,
           color: row.part.color,
@@ -2519,7 +2778,7 @@ import { buildDemandModel } from "./demand-model.js";
         (sum, row) => sum + row.pendingPrintTimeMinutes,
         0,
       );
-      const activeSetupPoolSize = activePrintersBySetupKey.get(getSetupKey(printer.color, printer.material))?.length || 0;
+      const activeSetupPoolSize = activePrintersBySetupKey.get(printer.filamentId)?.length || 0;
 
       return {
         ...printer,
@@ -2718,8 +2977,8 @@ import { buildDemandModel } from "./demand-model.js";
       id: dom.partForm.elements.id.value,
       name: dom.partForm.elements.name.value.trim(),
       sku: dom.partForm.elements.sku.value.trim(),
-      color: dom.partForm.elements.color.value.trim(),
-      material: dom.partForm.elements.material.value.trim(),
+      filamentId: dom.partForm.elements.filamentId.value || null,
+      filamentGramsPerUnit: dom.partForm.elements.filamentGramsPerUnit.value,
       inventoryQty: dom.partForm.elements.inventoryQty.value,
       minStock: dom.partForm.elements.minStock.value,
       printTimeMinutes: dom.partForm.elements.printTimeMinutes.value,
@@ -2753,8 +3012,7 @@ import { buildDemandModel } from "./demand-model.js";
       id: dom.printerForm.elements.id.value,
       name: dom.printerForm.elements.name.value.trim(),
       model: dom.printerForm.elements.model.value.trim(),
-      color: dom.printerForm.elements.color.value.trim(),
-      material: dom.printerForm.elements.material.value.trim(),
+      filamentId: dom.printerForm.elements.filamentId.value || null,
       active: dom.printerForm.elements.active.checked,
       notes: dom.printerForm.elements.notes.value.trim(),
     };
@@ -2779,6 +3037,9 @@ import { buildDemandModel } from "./demand-model.js";
       sku: part.sku,
       color: part.color,
       material: part.material,
+      filamentId: part.filamentId || null,
+      filamentGramsPerUnit: part.filamentGramsPerUnit ?? null,
+      queueVersion: part.queueVersion || 0,
       inventoryQty: toNonNegativeInteger(part.inventoryQty),
       minStock: toNonNegativeInteger(part.minStock),
       printTimeMinutes: toNonNegativeInteger(part.printTimeMinutes),
@@ -2793,6 +3054,7 @@ import { buildDemandModel } from "./demand-model.js";
       id: printer.id || "",
       name: printer.name,
       model: printer.model || "",
+      filamentId: printer.filamentId || null,
       color: printer.color,
       material: printer.material,
       active: printer.active !== false,
@@ -2834,6 +3096,8 @@ import { buildDemandModel } from "./demand-model.js";
       id: "",
       name: "",
       sku: "",
+      filamentId: null,
+      filamentGramsPerUnit: "",
       color: "",
       material: "",
       inventoryQty: 0,
@@ -2870,6 +3134,7 @@ import { buildDemandModel } from "./demand-model.js";
       id: "",
       name: "",
       model: "",
+      filamentId: null,
       color: "",
       material: "",
       active: true,
@@ -2909,6 +3174,9 @@ import { buildDemandModel } from "./demand-model.js";
   }
 
   function resetDrafts() {
+    ui.filamentDraft = blankFilamentDraft();
+    ui.filamentStockDraft = blankFilamentStockDraft();
+    ui.pendingMutations.clear();
     ui.partFormDraft = blankPartDraft();
     ui.productFormDraft = blankProductDraft();
     ui.printerFormDraft = blankPrinterDraft();
@@ -2917,6 +3185,8 @@ import { buildDemandModel } from "./demand-model.js";
 
   function createEmptyState() {
     return {
+      filaments: [],
+      filamentInventoryMovements: [],
       parts: [],
       products: [],
       printers: [],
@@ -2949,6 +3219,8 @@ import { buildDemandModel } from "./demand-model.js";
   function normalizeRemoteState(parsed) {
     const legacyMigration = migrateLegacyPrintJobs(Array.isArray(parsed.printJobs) ? parsed.printJobs : []);
     return {
+      filaments: Array.isArray(parsed.filaments) ? parsed.filaments : [],
+      filamentInventoryMovements: Array.isArray(parsed.filamentInventoryMovements) ? parsed.filamentInventoryMovements : [],
       parts: Array.isArray(parsed.parts) ? parsed.parts.map((part) => normalizePart(part)) : clone(seedState.parts),
       products: Array.isArray(parsed.products)
         ? parsed.products.map((product) => normalizeProduct(product))
@@ -3009,29 +3281,43 @@ import { buildDemandModel } from "./demand-model.js";
 
   async function mutateState(url, body) {
     const actor = getEffectiveActor();
-    const response = await window.fetch(url, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        accept: "application/json",
-      },
-      body: JSON.stringify({
-        ...body,
-        actor,
-      }),
-    });
-
-    if (!response.ok) {
-      throw new Error(await readApiError(response, `Failed to save shared state (${response.status}).`));
+    const signature = JSON.stringify([url, body, actor]);
+    const requestId = ui.pendingMutations.get(signature) || crypto.randomUUID();
+    ui.pendingMutations.set(signature, requestId);
+    ui.saving = true;
+    document.body.setAttribute("aria-busy", "true");
+    const buttons = [...document.querySelectorAll("button:not(:disabled)")];
+    buttons.forEach((button) => { button.disabled = true; });
+    try {
+      const response = await window.fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/json", accept: "application/json" },
+        body: JSON.stringify({ ...body, actor, requestId }),
+      });
+      if (!response.ok) {
+        if (response.status < 500) ui.pendingMutations.delete(signature);
+        const message = await readApiError(response, `Failed to save shared state (${response.status}).`);
+        if (response.status === 409) {
+          const fresh = await fetchSharedState();
+          replaceStateInMemory(fresh);
+          ui.lastSyncedState = clone(fresh);
+          ui.filamentStockDraft.expectedStockVersion = state.filaments.find((f) => f.id === ui.filamentStockDraft.filamentId)?.stockVersion || 0;
+        }
+        throw new Error(message);
+      }
+      const payload = await response.json();
+      applyRemoteMeta(payload.state?.meta || payload.meta);
+      const nextState = normalizeRemoteState(payload.state || payload);
+      replaceStateInMemory(nextState);
+      ui.backendUnavailable = false;
+      ui.lastSyncedState = clone(nextState);
+      ui.pendingMutations.delete(signature);
+      return payload;
+    } finally {
+      ui.saving = false;
+      document.body.removeAttribute("aria-busy");
+      buttons.forEach((button) => { if (button.isConnected) button.disabled = false; });
     }
-
-    const payload = await response.json();
-    applyRemoteMeta(payload.state?.meta || payload.meta);
-    const nextState = normalizeRemoteState(payload.state || payload);
-    replaceStateInMemory(nextState);
-    ui.backendUnavailable = false;
-    ui.lastSyncedState = clone(nextState);
-    return payload;
   }
 
   async function replaceSharedState(nextState) {
@@ -3068,6 +3354,8 @@ import { buildDemandModel } from "./demand-model.js";
   }
 
   function replaceStateInMemory(nextState) {
+    state.filaments = nextState.filaments || [];
+    state.filamentInventoryMovements = nextState.filamentInventoryMovements || [];
     state.parts = nextState.parts;
     state.products = nextState.products;
     state.printers = nextState.printers;
@@ -3113,6 +3401,7 @@ import { buildDemandModel } from "./demand-model.js";
       partId,
       plannedQty: 0,
       inProgressQty: 0,
+      prepaidFilamentQty: 0,
       failedQty: 0,
       updatedAt: "",
     };
@@ -3123,6 +3412,7 @@ import { buildDemandModel } from "./demand-model.js";
       partId: entry.partId || "",
       plannedQty: toNonNegativeInteger(entry.plannedQty),
       inProgressQty: toNonNegativeInteger(entry.inProgressQty),
+      prepaidFilamentQty: Math.min(toNonNegativeInteger(entry.prepaidFilamentQty), toNonNegativeInteger(entry.inProgressQty)),
       failedQty: toNonNegativeInteger(entry.failedQty),
       updatedAt: entry.updatedAt || "",
     };
@@ -3327,6 +3617,7 @@ import { buildDemandModel } from "./demand-model.js";
     if (dom.productsActivityToolbar) {
       dom.productsActivityToolbar.innerHTML = markup;
     }
+    dom.filamentsActivityToolbar.innerHTML = markup;
     if (dom.operatorName && dom.operatorName.value !== ui.operatorName) {
       dom.operatorName.value = ui.operatorName;
     }
@@ -3356,6 +3647,7 @@ import { buildDemandModel } from "./demand-model.js";
             <option value="all" ${ui.activityFilters.scope === "all" ? "selected" : ""}>All activity</option>
             <option value="part" ${ui.activityFilters.scope === "part" ? "selected" : ""}>Part inventory</option>
             <option value="product" ${ui.activityFilters.scope === "product" ? "selected" : ""}>Finished goods</option>
+            <option value="filament" ${ui.activityFilters.scope === "filament" ? "selected" : ""}>Filament inventory</option>
             <option value="queue" ${ui.activityFilters.scope === "queue" ? "selected" : ""}>Queue events</option>
             <option value="sales" ${ui.activityFilters.scope === "sales" ? "selected" : ""}>Sales orders</option>
           </select>
@@ -3764,12 +4056,8 @@ import { buildDemandModel } from "./demand-model.js";
     }
   }
 
-  function getSetupKey(color, material) {
-    return `${String(color || "").trim().toLowerCase()}::${String(material || "").trim().toLowerCase()}`;
-  }
-
   function printerMatchesPart(printer, part) {
-    return getSetupKey(printer.color, printer.material) === getSetupKey(part.color, part.material);
+    return printerMatchesFilament(printer, part);
   }
 
   function setInputValue(form, name, value) {

@@ -1,4 +1,5 @@
 import { buildDemandModel } from "../../../demand-model.js";
+import { gramsToMilligrams, consumptionQuantity, addSampleFilaments } from "../../../filament-model.js";
 
 export class ApiError extends Error {
   constructor(status, message) {
@@ -241,6 +242,8 @@ export const SEED_STATE = {
   salesOrderEvents: [],
 };
 
+addSampleFilaments(SEED_STATE);
+
 const SCHEMA_STATEMENTS = [
   "CREATE TABLE IF NOT EXISTS parts (id TEXT PRIMARY KEY, name TEXT NOT NULL, sku TEXT NOT NULL DEFAULT '', color TEXT NOT NULL, material TEXT NOT NULL, inventory_qty INTEGER NOT NULL DEFAULT 0, min_stock INTEGER NOT NULL DEFAULT 0, print_time_minutes INTEGER NOT NULL DEFAULT 0, image_ref TEXT NOT NULL DEFAULT '', file_ref TEXT NOT NULL DEFAULT '', notes TEXT NOT NULL DEFAULT '')",
   "CREATE TABLE IF NOT EXISTS products (id TEXT PRIMARY KEY, name TEXT NOT NULL, sku TEXT NOT NULL DEFAULT '', active INTEGER NOT NULL DEFAULT 1, requires_assembly INTEGER NOT NULL DEFAULT 1, finished_stock INTEGER NOT NULL DEFAULT 0, target_stock INTEGER NOT NULL DEFAULT 0, image_ref TEXT NOT NULL DEFAULT '', notes TEXT NOT NULL DEFAULT '')",
@@ -266,6 +269,73 @@ const SCHEMA_STATEMENTS = [
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_sales_order_single_close ON sales_order_events(order_id) WHERE action IN ('packed', 'cancelled')",
 ];
 
+const FILAMENT_SCHEMA_STATEMENTS = `
+CREATE TABLE IF NOT EXISTS filaments (
+  id TEXT PRIMARY KEY,
+  manufacturer TEXT NOT NULL,
+  material TEXT NOT NULL,
+  color TEXT NOT NULL,
+  spool_weight_mg INTEGER NOT NULL CHECK (spool_weight_mg > 0 AND spool_weight_mg <= 9007199254740991 AND spool_weight_mg % 10 = 0),
+  stock_mg INTEGER NOT NULL DEFAULT 0 CHECK (typeof(stock_mg) = 'integer' AND abs(stock_mg) <= 9007199254740991 AND stock_mg % 10 = 0)
+);
+CREATE TABLE IF NOT EXISTS part_filaments (
+  part_id TEXT PRIMARY KEY REFERENCES parts(id) ON DELETE CASCADE,
+  filament_id TEXT NOT NULL REFERENCES filaments(id) ON DELETE RESTRICT,
+  grams_per_unit_mg INTEGER NOT NULL CHECK (grams_per_unit_mg > 0 AND grams_per_unit_mg <= 9007199254740991 AND grams_per_unit_mg % 10 = 0)
+);
+CREATE TABLE IF NOT EXISTS printer_filaments (
+  printer_id TEXT PRIMARY KEY REFERENCES printers(id) ON DELETE CASCADE,
+  filament_id TEXT NOT NULL REFERENCES filaments(id) ON DELETE RESTRICT
+);
+CREATE TABLE IF NOT EXISTS filament_inventory_movements (
+  id TEXT PRIMARY KEY,
+  filament_id TEXT NOT NULL REFERENCES filaments(id) ON DELETE RESTRICT,
+  delta_mg INTEGER NOT NULL CHECK (typeof(delta_mg) = 'integer' AND abs(delta_mg) <= 9007199254740991 AND delta_mg % 10 = 0),
+  reason TEXT NOT NULL,
+  note TEXT NOT NULL DEFAULT '',
+  actor TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  part_id TEXT REFERENCES parts(id) ON DELETE RESTRICT,
+  print_event_id TEXT REFERENCES print_events(id) ON DELETE RESTRICT,
+  quantity INTEGER NOT NULL DEFAULT 0,
+  grams_per_unit_mg INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS mutation_receipts (
+  request_id TEXT PRIMARY KEY,
+  fingerprint TEXT NOT NULL,
+  entity_key TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  precondition_valid INTEGER NOT NULL CHECK (precondition_valid = 1)
+);
+CREATE INDEX IF NOT EXISTS idx_filament_movements_created ON filament_inventory_movements(filament_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_mutation_receipts_entity ON mutation_receipts(entity_key);
+`.split(";").map((statement) => statement.replace(/\s+/g, " ").trim()).filter(Boolean);
+
+// Track only credits from the former Start policy; new starts never create credits.
+const COMPLETION_FILAMENT_SCHEMA_STATEMENTS = `
+CREATE TABLE IF NOT EXISTS filament_prepaid_prints (
+  part_id TEXT PRIMARY KEY REFERENCES parts(id) ON DELETE CASCADE,
+  quantity INTEGER NOT NULL DEFAULT 0 CHECK (quantity >= 0)
+);
+INSERT OR IGNORE INTO filament_prepaid_prints (part_id, quantity)
+WITH deltas AS (
+  SELECT e.part_id, e.rowid AS event_order,
+    CASE WHEN e.action = 'start' THEN COALESCE((
+      SELECT SUM(m.quantity) FROM filament_inventory_movements m
+      WHERE m.print_event_id = e.id AND m.reason = 'print_started'
+    ), 0) WHEN e.action IN ('complete', 'fail') THEN -e.quantity ELSE 0 END AS delta
+  FROM print_events e
+  WHERE e.part_id IN (SELECT part_id FROM filament_inventory_movements WHERE reason = 'print_started')
+    AND NOT EXISTS (SELECT 1 FROM filament_prepaid_prints p WHERE p.part_id = e.part_id)
+), running AS (
+  SELECT part_id, delta, SUM(delta) OVER (PARTITION BY part_id ORDER BY event_order) AS balance
+  FROM deltas
+)
+SELECT r.part_id, MIN(COALESCE(s.in_progress_qty, 0), MAX(0, SUM(r.delta) - MIN(0, MIN(r.balance))))
+FROM running r LEFT JOIN print_state s ON s.part_id = r.part_id
+GROUP BY r.part_id;
+`.split(";").map((statement) => statement.replace(/\s+/g, " ").trim()).filter(Boolean);
+
 export async function getDb(context) {
   const db = context.env.DB;
   if (!db) {
@@ -277,7 +347,7 @@ export async function getDb(context) {
 
 export async function ensureSchema(db) {
   await db.exec("PRAGMA foreign_keys = ON");
-  for (const statement of SCHEMA_STATEMENTS) {
+  for (const statement of [...SCHEMA_STATEMENTS, ...FILAMENT_SCHEMA_STATEMENTS, ...COMPLETION_FILAMENT_SCHEMA_STATEMENTS]) {
     await db.exec(statement);
   }
   await ensureColumn(db, "part_inventory_movements", "actor", "ALTER TABLE part_inventory_movements ADD COLUMN actor TEXT NOT NULL DEFAULT ''");
@@ -304,6 +374,7 @@ export async function readState(db) {
     salesOrdersResult,
     salesOrderItemsResult,
     salesOrderEventsResult,
+    filamentsResult, partFilamentsResult, printerFilamentsResult, filamentMovementsResult, queueVersionsResult,
   ] = await db.batch([
     db.prepare(
       `SELECT id, name, sku, color, material, inventory_qty, min_stock, print_time_minutes, image_ref, file_ref, notes
@@ -326,9 +397,9 @@ export async function readState(db) {
        ORDER BY name ASC`,
     ),
     db.prepare(
-      `SELECT part_id, planned_qty, in_progress_qty, failed_qty, updated_at
-       FROM print_state
-       ORDER BY part_id ASC`,
+      `SELECT s.*, COALESCE(p.quantity, 0) AS prepaid_filament_qty
+       FROM print_state s LEFT JOIN filament_prepaid_prints p ON p.part_id = s.part_id
+       ORDER BY s.part_id ASC`,
     ),
     db.prepare(
       `SELECT id, part_id, quantity, completed_at
@@ -350,8 +421,9 @@ export async function readState(db) {
     db.prepare(
       `SELECT id, part_id, action, quantity, note, actor, created_at
        FROM print_events
-       ORDER BY created_at DESC
-       LIMIT 400`,
+       WHERE id IN (SELECT id FROM print_events ORDER BY created_at DESC, id DESC LIMIT 400)
+          OR id IN (SELECT print_event_id FROM filament_inventory_movements ORDER BY created_at DESC, id DESC LIMIT 400)
+       ORDER BY created_at DESC, id DESC`,
     ),
     db.prepare(
       `SELECT id, order_number, order_date, source, external_id, status, created_at, updated_at,
@@ -370,7 +442,25 @@ export async function readState(db) {
        ORDER BY created_at DESC
        LIMIT 400`,
     ),
+    db.prepare(`SELECT f.*, COALESCE((SELECT MAX(rowid) FROM filament_inventory_movements WHERE filament_id = f.id), 0) AS stock_version FROM filaments f ORDER BY manufacturer, material, color`),
+    db.prepare("SELECT * FROM part_filaments"),
+    db.prepare("SELECT * FROM printer_filaments"),
+    db.prepare("SELECT * FROM filament_inventory_movements ORDER BY created_at DESC, id DESC LIMIT 400"),
+    db.prepare("SELECT entity_key, MAX(rowid) AS version FROM mutation_receipts WHERE entity_key LIKE 'queue:%' GROUP BY entity_key"),
   ]);
+
+  const filaments = (filamentsResult.results || []).map((row) => ({
+    id: row.id, manufacturer: row.manufacturer, material: row.material, color: row.color,
+    spoolWeightGrams: row.spool_weight_mg / 1000, stockGrams: row.stock_mg / 1000, stockVersion: row.stock_version,
+  }));
+  const filamentsById = new Map(filaments.map((filament) => [filament.id, filament]));
+  const partFilaments = new Map((partFilamentsResult.results || []).map((row) => [row.part_id, row]));
+  const printerFilaments = new Map((printerFilamentsResult.results || []).map((row) => [row.printer_id, row]));
+  const queueVersions = new Map((queueVersionsResult.results || []).map((row) => [row.entity_key.slice(6), row.version]));
+  const filamentProperties = (assignment) => {
+    const filament = filamentsById.get(assignment?.filament_id);
+    return filament ? { filamentId: filament.id, color: filament.color, material: filament.material } : { filamentId: null };
+  };
 
   const requirementsByProductId = new Map();
   for (const row of requirementsResult.results || []) {
@@ -396,12 +486,21 @@ export async function readState(db) {
   }
 
   return normalizeState({
+    filaments,
+    filamentInventoryMovements: (filamentMovementsResult.results || []).map((row) => ({
+      id: row.id, filamentId: row.filament_id, deltaGrams: row.delta_mg / 1000, reason: row.reason,
+      note: row.note, actor: row.actor, createdAt: row.created_at, partId: row.part_id,
+      printEventId: row.print_event_id, quantity: row.quantity, gramsPerUnit: row.grams_per_unit_mg / 1000,
+    })),
     parts: (partsResult.results || []).map((row) => ({
       id: row.id,
       name: row.name,
       sku: row.sku,
       color: row.color,
       material: row.material,
+      ...filamentProperties(partFilaments.get(row.id)),
+      filamentGramsPerUnit: partFilaments.has(row.id) ? partFilaments.get(row.id).grams_per_unit_mg / 1000 : null,
+      queueVersion: queueVersions.get(row.id) || 0,
       inventoryQty: row.inventory_qty,
       minStock: row.min_stock,
       printTimeMinutes: row.print_time_minutes,
@@ -427,6 +526,7 @@ export async function readState(db) {
       model: row.model,
       color: row.color,
       material: row.material,
+      ...filamentProperties(printerFilaments.get(row.id)),
       active: Boolean(row.active),
       notes: row.notes,
     })),
@@ -434,6 +534,7 @@ export async function readState(db) {
       partId: row.part_id,
       plannedQty: row.planned_qty,
       inProgressQty: row.in_progress_qty,
+      prepaidFilamentQty: row.prepaid_filament_qty,
       failedQty: row.failed_qty,
       updatedAt: row.updated_at,
     })),
@@ -505,6 +606,12 @@ export async function readState(db) {
 export async function replaceState(db, inputState) {
   const state = normalizeState(inputState);
   const statements = [
+    db.prepare("DELETE FROM mutation_receipts"),
+    db.prepare("DELETE FROM filament_prepaid_prints"),
+    db.prepare("DELETE FROM filament_inventory_movements"),
+    db.prepare("DELETE FROM part_filaments"),
+    db.prepare("DELETE FROM printer_filaments"),
+    db.prepare("DELETE FROM filaments"),
     db.prepare("DELETE FROM sales_order_events"),
     db.prepare("DELETE FROM sales_order_items"),
     db.prepare("DELETE FROM sales_orders"),
@@ -518,6 +625,12 @@ export async function replaceState(db, inputState) {
     db.prepare("DELETE FROM printers"),
     db.prepare("DELETE FROM parts"),
   ];
+
+  for (const filament of state.filaments) {
+    validateFilament(filament);
+    statements.push(db.prepare("INSERT INTO filaments (id, manufacturer, material, color, spool_weight_mg, stock_mg) VALUES (?, ?, ?, ?, ?, ?)")
+      .bind(filament.id, filament.manufacturer, filament.material, filament.color, requireGrams(filament.spoolWeightGrams), requireGrams(filament.stockGrams)));
+  }
 
   for (const part of state.parts) {
     statements.push(
@@ -656,6 +769,11 @@ export async function replaceState(db, inputState) {
     );
   }
 
+  for (const part of state.parts) {
+    const prepaid = state.printState.find((entry) => entry.partId === part.id)?.prepaidFilamentQty || 0;
+    statements.push(db.prepare("INSERT INTO filament_prepaid_prints (part_id, quantity) VALUES (?, ?)").bind(part.id, prepaid));
+  }
+
   for (const entry of state.completedPrints) {
     statements.push(
       db
@@ -727,6 +845,14 @@ export async function replaceState(db, inputState) {
     );
   }
 
+  for (const part of state.parts) {
+    if (part.filamentId) statements.push(partFilamentStatement(db, part.id, part.filamentId, requireGrams(part.filamentGramsPerUnit, true)));
+  }
+  for (const printer of state.printers) {
+    if (printer.filamentId) statements.push(printerFilamentStatement(db, printer.id, printer.filamentId));
+  }
+  for (const entry of state.filamentInventoryMovements) statements.push(createFilamentMovementStatement(db, entry));
+
   await runInTransaction(db, statements);
   return state;
 }
@@ -743,8 +869,11 @@ export async function seedStateIfEmpty(db) {
 export async function savePart(db, input, actor = "") {
   const part = normalizePart(input);
   assert(part.name, "Part name is required.");
-  assert(part.color, "Part color is required.");
-  assert(part.material, "Part material is required.");
+  const filament = await fetchFilamentRow(db, part.filamentId);
+  assert(filament, "Select a filament for this part.");
+  const usageMg = requireGrams(part.filamentGramsPerUnit, true);
+  part.color = filament.color;
+  part.material = filament.material;
 
   const id = part.id || createId("part");
   const existing = await fetchPartRow(db, id);
@@ -783,6 +912,8 @@ export async function savePart(db, input, actor = "") {
         part.notes,
       ),
   ];
+
+  statements.push(partFilamentStatement(db, id, part.filamentId, usageMg));
 
   const inventoryDelta = nextInventoryQty - previousInventoryQty;
   if (existing && inventoryDelta !== 0) {
@@ -1330,8 +1461,10 @@ export async function cancelSalesOrder(db, { orderId, actor }) {
 export async function savePrinter(db, input) {
   const printer = normalizePrinter(input);
   assert(printer.name, "Printer name is required.");
-  assert(printer.color, "Printer color is required.");
-  assert(printer.material, "Printer material is required.");
+  const filament = printer.filamentId ? await fetchFilamentRow(db, printer.filamentId) : null;
+  assert(!printer.filamentId || filament, "Selected filament no longer exists.");
+  printer.color = filament?.color || "";
+  printer.material = filament?.material || "";
 
   const id = printer.id || createId("printer");
   await runInTransaction(db, [
@@ -1349,6 +1482,7 @@ export async function savePrinter(db, input) {
           notes = excluded.notes`,
       )
       .bind(id, printer.name, printer.model, printer.color, printer.material, printer.active ? 1 : 0, printer.notes),
+    ...(printer.filamentId ? [printerFilamentStatement(db, id, printer.filamentId)] : [db.prepare("DELETE FROM printer_filaments WHERE printer_id = ?").bind(id)]),
   ]);
   return id;
 }
@@ -1369,16 +1503,30 @@ export async function setPrinterActive(db, { printerId, active }) {
   ]);
 }
 
-export async function applyQueueAction(db, { partId, action, quantity, actor }) {
+export async function applyQueueAction(db, { partId, action, quantity, actor, requestId, expectedQueueVersion, expectedFilamentId, expectedFilamentGramsPerUnit }) {
   assert(partId, "Part id is required.");
   assert(action, "Queue action is required.");
-  const qty = toNonNegativeInteger(quantity);
-  assert(qty > 0, "Queue quantity must be greater than zero.");
+  const qty = Number(quantity);
+  assert(Number.isSafeInteger(qty) && qty > 0, "Queue quantity must be a positive whole number.");
+  const fingerprint = JSON.stringify(["queue", partId, action, qty, normalizeActor(actor), expectedQueueVersion, expectedFilamentId, expectedFilamentGramsPerUnit]);
+  if (await isMutationReplay(db, requestId, fingerprint)) return;
 
   const state = await readState(db);
   const queueByPartId = buildQueueByPartId(state);
   const row = queueByPartId.get(partId);
   assert(row, "Queue row not found.", 404);
+  assert(Number.isSafeInteger(expectedQueueVersion) && expectedQueueVersion === row.part.queueVersion, "The queue changed. Refresh and retry.", 409);
+  const consumedQty = consumptionQuantity(action, qty, row.prepaidFilamentQty);
+  let consumptionMg = 0;
+  let usageMg = 0;
+  if (consumedQty > 0 || action === "start") {
+    assert(row.part.filamentId && state.filaments.some((filament) => filament.id === row.part.filamentId), "Configure this part's filament and grams per unit before starting or completing prints.");
+    usageMg = requireGrams(row.part.filamentGramsPerUnit, true);
+    assert(expectedFilamentId === row.part.filamentId && gramsToMilligrams(expectedFilamentGramsPerUnit) === usageMg,
+      "This part's filament settings changed. Refresh and retry.", 409);
+    consumptionMg = consumedQty * usageMg;
+    assert(Number.isSafeInteger(consumptionMg), "Filament consumption is too large.");
+  }
 
   const entry = normalizePrintStateEntry(
     state.printState.find((candidate) => candidate.partId === partId) || {
@@ -1410,6 +1558,7 @@ export async function applyQueueAction(db, { partId, action, quantity, actor }) 
     let remainder = qty;
     const fromInProgress = Math.min(entry.inProgressQty, remainder);
     entry.inProgressQty -= fromInProgress;
+    entry.prepaidFilamentQty = Math.max(entry.prepaidFilamentQty - fromInProgress, 0);
     remainder -= fromInProgress;
     const fromPlanned = Math.min(entry.plannedQty, remainder);
     entry.plannedQty -= fromPlanned;
@@ -1417,6 +1566,7 @@ export async function applyQueueAction(db, { partId, action, quantity, actor }) 
     assert(row.inProgressQty > 0, "Only in-progress quantity can be marked as failed.");
     assert(qty <= row.inProgressQty, `The quantity cannot be greater than ${row.inProgressQty}.`);
     entry.inProgressQty -= qty;
+    entry.prepaidFilamentQty = Math.max(entry.prepaidFilamentQty - qty, 0);
     entry.failedQty += qty;
   } else if (action === "retry") {
     assert(row.failedQty > 0, "There is no failed quantity to retry.");
@@ -1428,7 +1578,19 @@ export async function applyQueueAction(db, { partId, action, quantity, actor }) 
   }
 
   entry.updatedAt = timestamp;
-  const statements = [];
+  const entityKey = `queue:${partId}`;
+  let guard = "COALESCE((SELECT MAX(rowid) FROM mutation_receipts WHERE entity_key = ?), 0) = ?";
+  const bindings = [entityKey, expectedQueueVersion];
+  if (consumedQty > 0 || action === "start") {
+    guard += " AND EXISTS (SELECT 1 FROM part_filaments WHERE part_id = ? AND filament_id = ? AND grams_per_unit_mg = ?)";
+    bindings.push(partId, row.part.filamentId, usageMg);
+  }
+  const statements = [mutationReceipt(db, requestId, fingerprint, entityKey, guard, bindings)];
+  const printEventId = createId("print-event");
+
+  if (action === "complete" || action === "fail") {
+    statements.push(db.prepare("UPDATE filament_prepaid_prints SET quantity = ? WHERE part_id = ?").bind(entry.prepaidFilamentQty, partId));
+  }
 
   if (entry.plannedQty > 0 || entry.inProgressQty > 0 || entry.failedQty > 0) {
     statements.push(
@@ -1451,7 +1613,7 @@ export async function applyQueueAction(db, { partId, action, quantity, actor }) 
 
   statements.push(
     createPrintEventStatement(db, {
-      id: createId("print-event"),
+      id: printEventId,
       partId,
       action,
       quantity: qty,
@@ -1460,6 +1622,18 @@ export async function applyQueueAction(db, { partId, action, quantity, actor }) 
       createdAt: timestamp,
     }),
   );
+
+  if (consumedQty > 0) {
+    statements.push(
+      db.prepare("UPDATE filaments SET stock_mg = stock_mg - ? WHERE id = ?").bind(consumptionMg, row.part.filamentId),
+      createFilamentMovementStatement(db, {
+        id: createId("filament-move"), filamentId: row.part.filamentId,
+        deltaGrams: -consumptionMg / 1000, reason: "print_completed",
+        partId, printEventId, quantity: consumedQty, gramsPerUnit: usageMg / 1000,
+        note: `${consumedQty} × ${usageMg / 1000} g for ${row.part.name}.`, actor: normalizedActor, createdAt: timestamp,
+      }),
+    );
+  }
 
   if (action === "complete") {
     statements.push(
@@ -1489,7 +1663,7 @@ export async function applyQueueAction(db, { partId, action, quantity, actor }) 
     );
   }
 
-  await runInTransaction(db, statements);
+  await commitMutation(db, statements, requestId, fingerprint);
 }
 
 export async function withMutationState(context, callback) {
@@ -1504,6 +1678,169 @@ export async function withMutationState(context, callback) {
       },
       error instanceof ApiError ? error.status : 500,
     );
+  }
+}
+
+export function normalizeFilament(input) {
+  return {
+    id: String(input?.id || ""), manufacturer: String(input?.manufacturer || "").trim(),
+    material: String(input?.material || "").trim(), color: String(input?.color || "").trim(),
+    spoolWeightGrams: input?.spoolWeightGrams ?? null, stockGrams: input?.stockGrams ?? 0,
+    stockVersion: toNonNegativeInteger(input?.stockVersion),
+  };
+}
+
+export function normalizeFilamentMovement(input) {
+  return {
+    id: String(input?.id || ""), filamentId: String(input?.filamentId || ""),
+    deltaGrams: input?.deltaGrams ?? 0, reason: String(input?.reason || ""),
+    note: String(input?.note || ""), actor: normalizeActor(input?.actor), createdAt: String(input?.createdAt || ""),
+    partId: input?.partId || null, printEventId: input?.printEventId || null,
+    quantity: toNonNegativeInteger(input?.quantity), gramsPerUnit: input?.gramsPerUnit ?? 0,
+  };
+}
+
+function requireGrams(value, positive = false) {
+  const mg = gramsToMilligrams(value);
+  assert(mg !== null && (!positive || mg > 0), positive
+    ? "Weight must be greater than zero, with at most two decimal places."
+    : "Weight must be a finite number with at most two decimal places.");
+  return mg;
+}
+
+function requireRolls(value, positive = false) {
+  const rolls = Number(value);
+  assert(value !== null && value !== undefined && String(value).trim() !== "" && Number.isSafeInteger(rolls) && rolls >= (positive ? 1 : 0), "Roll count must be a whole non-negative number.");
+  return rolls;
+}
+
+function validateFilament(filament) {
+  for (const field of ["manufacturer", "material", "color"]) {
+    assert(filament[field] && filament[field].length <= 80, `Filament ${field} is required (maximum 80 characters).`);
+  }
+  requireGrams(filament.spoolWeightGrams, true);
+}
+
+function fetchFilamentRow(db, id) {
+  return db.prepare(`SELECT f.*, COALESCE((SELECT MAX(rowid) FROM filament_inventory_movements WHERE filament_id = f.id), 0) AS stock_version FROM filaments f WHERE id = ?`).bind(id || "").first();
+}
+
+function partFilamentStatement(db, partId, filamentId, usageMg) {
+  return db.prepare(`INSERT INTO part_filaments (part_id, filament_id, grams_per_unit_mg) VALUES (?, ?, ?)
+    ON CONFLICT(part_id) DO UPDATE SET filament_id = excluded.filament_id, grams_per_unit_mg = excluded.grams_per_unit_mg`).bind(partId, filamentId, usageMg);
+}
+
+function printerFilamentStatement(db, printerId, filamentId) {
+  return db.prepare(`INSERT INTO printer_filaments (printer_id, filament_id) VALUES (?, ?)
+    ON CONFLICT(printer_id) DO UPDATE SET filament_id = excluded.filament_id`).bind(printerId, filamentId);
+}
+
+function createFilamentMovementStatement(db, entry) {
+  return db.prepare(`INSERT INTO filament_inventory_movements
+    (id, filament_id, delta_mg, reason, note, actor, created_at, part_id, print_event_id, quantity, grams_per_unit_mg)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    .bind(entry.id, entry.filamentId, requireGrams(entry.deltaGrams), entry.reason, entry.note || "", normalizeActor(entry.actor),
+      entry.createdAt, entry.partId || null, entry.printEventId || null, entry.quantity || 0, requireGrams(entry.gramsPerUnit ?? 0));
+}
+
+// A CHECK constraint in the receipt insert aborts the entire D1 batch if a
+// concurrently committed command changed the state used to calculate this one.
+function mutationReceipt(db, requestId, fingerprint, entityKey, guard = "1", bindings = []) {
+  return db.prepare(`INSERT INTO mutation_receipts (request_id, fingerprint, entity_key, created_at, precondition_valid)
+    VALUES (?, ?, ?, ?, CASE WHEN (${guard}) THEN 1 ELSE 0 END)`)
+    .bind(requestId, fingerprint, entityKey, new Date().toISOString(), ...bindings);
+}
+
+async function isMutationReplay(db, requestId, fingerprint) {
+  assert(typeof requestId === "string" && requestId.length >= 8 && requestId.length <= 100, "A requestId is required for this action.");
+  const previous = await db.prepare("SELECT fingerprint FROM mutation_receipts WHERE request_id = ?").bind(requestId).first();
+  assert(!previous || previous.fingerprint === fingerprint, "This requestId was already used for a different action.", 409);
+  return Boolean(previous);
+}
+
+async function commitMutation(db, statements, requestId, fingerprint) {
+  try {
+    await runInTransaction(db, statements);
+  } catch (error) {
+    if (await isMutationReplay(db, requestId, fingerprint)) return;
+    if (String(error.message).includes("precondition_valid")) {
+      throw new ApiError(409, "The state changed while this action was being saved. Refresh and retry.");
+    }
+    throw error;
+  }
+}
+
+export async function saveFilament(db, { filament: input, initialRolls = 0, additionalGrams = 0, requestId, actor = "" }) {
+  const filament = normalizeFilament(input);
+  validateFilament(filament);
+  const fingerprint = JSON.stringify(["filament-save", filament.id, filament.manufacturer, filament.material, filament.color, filament.spoolWeightGrams, initialRolls, additionalGrams, normalizeActor(actor)]);
+  if (await isMutationReplay(db, requestId, fingerprint)) return;
+  const existing = filament.id ? await fetchFilamentRow(db, filament.id) : null;
+  const id = filament.id || createId("filament");
+  const spoolMg = requireGrams(filament.spoolWeightGrams, true);
+  const openingMg = existing ? 0 : requireRolls(initialRolls) * spoolMg + requireGrams(additionalGrams);
+  assert(Number.isSafeInteger(openingMg) && openingMg >= 0 && (existing || requireGrams(additionalGrams) >= 0), "Opening stock must be a non-negative, safe weight.");
+  const statements = [mutationReceipt(db, requestId, fingerprint, `filament:${id}`)];
+  if (existing) {
+    statements.push(db.prepare("UPDATE filaments SET manufacturer = ?, material = ?, color = ?, spool_weight_mg = ? WHERE id = ?")
+      .bind(filament.manufacturer, filament.material, filament.color, spoolMg, id));
+  } else {
+    statements.push(db.prepare("INSERT INTO filaments (id, manufacturer, material, color, spool_weight_mg, stock_mg) VALUES (?, ?, ?, ?, ?, ?)")
+      .bind(id, filament.manufacturer, filament.material, filament.color, spoolMg, openingMg));
+    if (openingMg > 0) statements.push(createFilamentMovementStatement(db, {
+      id: createId("filament-move"), filamentId: id, deltaGrams: openingMg / 1000,
+      reason: "opening_balance", note: "Initial filament stock.", actor, createdAt: new Date().toISOString(),
+    }));
+  }
+  await commitMutation(db, statements, requestId, fingerprint);
+  return id;
+}
+
+export async function adjustFilamentInventory(db, { filamentId, action, rolls = 0, additionalGrams = 0, deltaGrams = 0, note = "", expectedStockVersion, requestId, actor = "" }) {
+  const fingerprint = JSON.stringify(["filament-stock", filamentId, action, rolls, additionalGrams, deltaGrams, note, expectedStockVersion, normalizeActor(actor)]);
+  if (await isMutationReplay(db, requestId, fingerprint)) return;
+  const filament = await fetchFilamentRow(db, filamentId);
+  assert(filament, "Filament not found.", 404);
+  let deltaMg;
+  if (action === "receive") {
+    deltaMg = requireRolls(rolls, true) * filament.spool_weight_mg;
+  } else if (action === "set") {
+    assert(Number.isSafeInteger(expectedStockVersion) && expectedStockVersion === filament.stock_version, "Filament stock changed. Refresh and retry the count.", 409);
+    const additionalMg = requireGrams(additionalGrams);
+    assert(additionalMg >= 0, "Additional grams must be non-negative.");
+    deltaMg = requireRolls(rolls) * filament.spool_weight_mg + additionalMg - filament.stock_mg;
+  } else if (action === "adjust") {
+    deltaMg = requireGrams(deltaGrams);
+  } else {
+    throw new ApiError(400, "Unknown filament inventory action.");
+  }
+  assert(Number.isSafeInteger(deltaMg) && Number.isSafeInteger(filament.stock_mg + deltaMg), "Stock weight is too large.");
+  assert(action === "receive" || String(note).trim(), "Enter a reason for this stock correction.");
+  const guard = "EXISTS (SELECT 1 FROM filaments WHERE id = ? AND spool_weight_mg = ?)" + (action === "set"
+    ? " AND COALESCE((SELECT MAX(rowid) FROM filament_inventory_movements WHERE filament_id = ?), 0) = ?" : "");
+  const bindings = [filamentId, filament.spool_weight_mg, ...(action === "set" ? [filamentId, expectedStockVersion] : [])];
+  await commitMutation(db, [
+    mutationReceipt(db, requestId, fingerprint, `filament:${filamentId}`, guard, bindings),
+    db.prepare("UPDATE filaments SET stock_mg = stock_mg + ? WHERE id = ?").bind(deltaMg, filamentId),
+    createFilamentMovementStatement(db, {
+      id: createId("filament-move"), filamentId, deltaGrams: deltaMg / 1000,
+      reason: action === "receive" ? "rolls_received" : action === "set" ? "stock_count" : "manual_adjustment",
+      note: String(note).trim(), actor, createdAt: new Date().toISOString(),
+    }),
+  ], requestId, fingerprint);
+}
+
+export async function deleteFilament(db, id) {
+  assert(await fetchFilamentRow(db, id), "Filament not found.", 404);
+  const references = await db.prepare(`SELECT 1 AS found FROM part_filaments WHERE filament_id = ?
+    UNION ALL SELECT 1 FROM printer_filaments WHERE filament_id = ?
+    UNION ALL SELECT 1 FROM filament_inventory_movements WHERE filament_id = ? LIMIT 1`).bind(id, id, id).first();
+  assert(!references, "Cannot delete filament referenced by parts, printers, or inventory history.", 409);
+  try {
+    await runInTransaction(db, [db.prepare("DELETE FROM filaments WHERE id = ?").bind(id)]);
+  } catch (error) {
+    if (String(error.message).includes("FOREIGN KEY")) throw new ApiError(409, "This filament is now referenced. Refresh and retry.");
+    throw error;
   }
 }
 
@@ -1552,6 +1889,8 @@ export function resolveRequestActor(context, requestedActor = "") {
 
 export function normalizeState(input) {
   return {
+    filaments: Array.isArray(input?.filaments) ? input.filaments.map(normalizeFilament) : [],
+    filamentInventoryMovements: Array.isArray(input?.filamentInventoryMovements) ? input.filamentInventoryMovements.map(normalizeFilamentMovement) : [],
     parts: Array.isArray(input?.parts) ? input.parts.map((part) => normalizePart(part)) : [],
     products: Array.isArray(input?.products) ? input.products.map((product) => normalizeProduct(product)) : [],
     printers: Array.isArray(input?.printers) ? input.printers.map((printer) => normalizePrinter(printer)) : [],
@@ -1592,6 +1931,9 @@ export function normalizePart(part) {
     sku: String(part?.sku || ""),
     color: String(part?.color || ""),
     material: String(part?.material || ""),
+    filamentId: part?.filamentId ? String(part.filamentId) : null,
+    filamentGramsPerUnit: part?.filamentGramsPerUnit ?? null,
+    queueVersion: toNonNegativeInteger(part?.queueVersion),
     inventoryQty: toNonNegativeInteger(part?.inventoryQty),
     minStock: toNonNegativeInteger(part?.minStock),
     printTimeMinutes: toNonNegativeInteger(part?.printTimeMinutes),
@@ -1643,6 +1985,7 @@ export function normalizePrinter(printer) {
     id: String(printer?.id || ""),
     name: String(printer?.name || ""),
     model: String(printer?.model || ""),
+    filamentId: printer?.filamentId ? String(printer.filamentId) : null,
     color: String(printer?.color || ""),
     material: String(printer?.material || ""),
     active: printer?.active !== false,
@@ -1655,6 +1998,7 @@ export function normalizePrintStateEntry(entry) {
     partId: String(entry?.partId || ""),
     plannedQty: toNonNegativeInteger(entry?.plannedQty),
     inProgressQty: toNonNegativeInteger(entry?.inProgressQty),
+    prepaidFilamentQty: Math.min(toNonNegativeInteger(entry?.prepaidFilamentQty), toNonNegativeInteger(entry?.inProgressQty)),
     failedQty: toNonNegativeInteger(entry?.failedQty),
     updatedAt: String(entry?.updatedAt || ""),
   };
@@ -1768,6 +2112,8 @@ export function normalizeSalesOrderEvent(entry) {
 
 export function hasData(state) {
   return (
+    state.filaments.length > 0 ||
+    state.filamentInventoryMovements.length > 0 ||
     state.parts.length > 0 ||
     state.products.length > 0 ||
     state.printers.length > 0 ||
@@ -1939,6 +2285,7 @@ function buildQueueByPartId(state) {
       shortageQty,
       plannedQty,
       inProgressQty,
+      prepaidFilamentQty: printState.prepaidFilamentQty,
       failedQty,
       remainingQty,
     });

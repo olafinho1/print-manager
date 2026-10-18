@@ -23,6 +23,7 @@ This document is for humans working on setup, local development, deployment, and
 ## Prerequisites
 
 - Node.js and npm installed locally
+- Node.js 24 or newer for the SQLite-backed test suite (`node:sqlite`)
 - Cloudflare account
 - Wrangler login completed
 - D1 database created
@@ -178,6 +179,8 @@ Returns:
 - `partInventoryMovements`
 - `finishedInventoryMovements`
 - `printEvents`
+- `filaments`
+- `filamentInventoryMovements`
 - `meta.auth`
 - `meta.app`
 
@@ -201,6 +204,9 @@ These routes all return the refreshed full state:
 - `POST /api/printers-delete`
 - `POST /api/printer-actions`
 - `POST /api/queue-actions`
+- `POST /api/filaments`
+- `POST /api/filaments-delete`
+- `POST /api/filaments-inventory`
 - `POST /api/sales-orders`
 - `POST /api/sales-order-actions`
 
@@ -312,3 +318,37 @@ Remember:
 - optional demand sources beyond manual sales orders
 - R2-backed file and image uploads
 - Shopify order ingestion
+
+## Filament persistence and API
+
+`migrations/0004_filaments.sql` and the matching runtime schema in `store.js` add `filaments`, `part_filaments`, `printer_filaments`, `filament_inventory_movements`, and `mutation_receipts`. Assignment tables avoid altering existing production tables. `0005_completion_filament.sql` adds `filament_prepaid_prints`, which carries outstanding quantities charged by the former Start policy. It reconstructs the outstanding quantity from committed print events, consuming credits on Complete/Fail and preserving zero rows as migration markers. Both migration commands include the new SQL; repeated application is safe. Runtime `db.exec()` statements must be single-line because D1 executes each nonempty line separately.
+
+The read model exposes filament `id`, `manufacturer`, `material`, `color`, `spoolWeightGrams`, signed `stockGrams`, and `stockVersion`. Parts gain nullable `filamentId`/`filamentGramsPerUnit` and `queueVersion`; printers gain nullable `filamentId`. Color/material are derived from the assigned catalog entry, with legacy values retained for unassigned records. `printState` also exposes `prepaidFilamentQty` for outstanding units charged under the earlier policy; restore preserves these credits independently of the history window. Versions are opaque optimistic-concurrency tokens and may change after full-state restore.
+
+All public weights are grams with at most two decimal places. Database weights and arithmetic use integer milligrams. Opening/count inputs require whole non-negative rolls and non-negative additional grams; corrections can be signed. Spool weights and part usage must be positive. Catalog edits never change stored weight balances.
+
+New mutation payloads:
+
+- `POST /api/filaments`: `{ filament: { id?, manufacturer, material, color, spoolWeightGrams }, initialRolls?, additionalGrams?, requestId, actor? }`. Opening stock applies only to creation. Omit `id` for a server-generated ID.
+- `POST /api/filaments-inventory`: `{ filamentId, action, requestId, actor?, ... }`. `receive` takes positive whole `rolls`; `set` takes `rolls`, `additionalGrams`, `note`, and `expectedStockVersion`; `adjust` takes signed `deltaGrams` and `note`.
+- `POST /api/filaments-delete`: `{ id }`. Parts, printers, and inventory history prevent deletion.
+- `POST /api/queue-actions` now requires `requestId` and `expectedQueueVersion` from the displayed part. For Start and Complete, also send `expectedFilamentId` and `expectedFilamentGramsPerUnit` from that part. This prevents charging a different configuration than the operator reviewed.
+
+Queue actions and filament save/stock commands use unique request IDs. Repeating an identical request returns refreshed state without another write; reusing the ID with another payload returns 409. Queue/version and assignment checks execute inside the same D1 batch as all balance, ledger, part-stock, and event writes. A failed precondition rolls back the whole batch and returns 409. Counted stock also checks its movement version to avoid overwriting concurrent consumption. Additive receipts and consumption update balances arithmetically, allowing different parts to share a filament safely. The frontend retains request IDs after ambiguous failures within the current page session and refreshes shared state on conflicts.
+
+Complete deducts `completed quantity × current grams per unit`, with a `print_completed` filament movement. Start/Fail/Retry do not change filament stock; record waste from failures via a manual adjustment. Completion consumes any prepaid units first to avoid charging earlier Start deductions twice. Filament movements preserve actor, time, signed grams, part, linked print event, printed quantity, and usage per unit. Reading state includes the latest 400 filament movements and retains any print events those movements reference, even beyond the normal recent-event window. Full-state restore writes parents before assignments/history and resets mutation receipts. Invalid references roll back the replacement.
+
+## Filament rollout and verification
+
+1. Apply the additive migration or let runtime schema initialization create its tables. No filament data is guessed for existing installations.
+2. Add catalog entries and enter available weight. If counting during a print, account for material already used on unfinished units because completion will deduct the full estimate.
+3. Assign filaments and positive per-unit usage to parts before starting or completing prints. Completion uses the settings reviewed in the quantity dialog. Existing prepaid quantities can finish without another charge; no usage is invented for unconfigured parts.
+4. Assign the exact loaded filament to each printer. Unassigned/inactive printers do not contribute to matching capacity. Future filament demand includes planned, unplanned, and in-progress quantities, excluding prepaid credits from the earlier Start policy.
+
+`npm test` uses real SQLite with D1-style atomic batches and checks duplicates, interleaved commands, rollback, precision, legacy upgrades, restored history, and exact-filament queue timing. Run `npm run build` afterward. For full-stack checks, use a separate temporary local database:
+
+```bash
+WRANGLER_SEND_METRICS=false npm run dev:cf -- --port 8790 --persist-to /tmp/print-manager-filament-check
+```
+
+Verify `/api/state` and metadata, roll receipts/counts, Start → partial Complete, mixed direct completion, Fail → Retry → Start → Complete, prepaid upgrades, deficits, operator history, and assembly/direct packing without extra filament deductions. Never point test resets or fixtures at production D1.
