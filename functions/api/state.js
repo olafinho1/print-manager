@@ -17,7 +17,7 @@ export async function onRequest(context) {
 
     if (context.request.method === "GET") {
       const state = await readState(db);
-      if (hasData(state)) {
+      if (hasData(state) || context.env.PREVIEW_DATA_SOURCE === "production snapshot") {
         return json(buildStateResponse(context, state));
       }
       return json(buildStateResponse(context, await seedStateIfEmpty(db)));

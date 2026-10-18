@@ -40,6 +40,7 @@
             </button>
           </div>
         </div>
+        <div id="filament-order-alert" class="filament-order-alert" hidden></div>
         <div id="summary-cards" class="summary-grid"></div>
       </header>
 
@@ -48,6 +49,7 @@
         <button class="tab-button" data-tab="dashboard" type="button">Dashboard</button>
         <button class="tab-button" data-tab="parts" type="button">Parts</button>
         <button class="tab-button" data-tab="products" type="button">Products</button>
+        <button class="tab-button" data-tab="filaments" type="button">Filaments</button>
         <button class="tab-button" data-tab="printers" type="button">Printers</button>
         <button class="tab-button" data-tab="queue" type="button">Print Queue</button>
       </nav>
@@ -115,6 +117,19 @@
 
         <section id="dashboard-view" class="view" hidden>
           <div class="dashboard-grid">
+            <section id="filament-order-panel" class="panel panel--wide filament-order-panel" aria-labelledby="filament-order-title">
+              <div class="panel__head">
+                <div>
+                  <p class="panel__eyebrow">Material planning</p>
+                  <h2 id="filament-order-title">Filament to order</h2>
+                </div>
+                <span id="filament-order-count" class="panel__meta"></span>
+              </div>
+              <p class="helper-text">Shortages cover future queue demand from open sales orders and any existing stock deficit. Suggested rolls round up each filament's shortage to whole spools.</p>
+              <div id="filament-order-setup"></div>
+              <div id="filament-order-list" class="list-stack"></div>
+            </section>
+
             <section class="panel">
               <div class="panel__head">
                 <div>
@@ -210,14 +225,15 @@
                   <input name="sku" type="text" maxlength="40" placeholder="WHIM-LEG-S" />
                 </label>
 
-                <label class="field">
-                  <span>Color</span>
-                  <input name="color" type="text" maxlength="40" placeholder="Blue" required />
+                <label class="field field--full">
+                  <span>Filament</span>
+                  <select name="filamentId" required></select>
+                  <span class="helper-text">Manage manufacturers, materials and colors in Filaments.</span>
                 </label>
-
-                <label class="field">
-                  <span>Material</span>
-                  <input name="material" type="text" maxlength="40" placeholder="PLA" required />
+                <label class="field field--full">
+                  <span>Filament per unit (g)</span>
+                  <input name="filamentGramsPerUnit" type="number" min="0.01" step="0.01" required />
+                  <span class="helper-text">Total slicer estimate per part, including supports and waste.</span>
                 </label>
 
                 <label class="field">
@@ -397,6 +413,54 @@
           </div>
         </section>
 
+        <section id="filaments-view" class="view" hidden>
+          <div class="split-layout">
+            <div class="filament-editors">
+              <section class="panel panel--form">
+                <div class="panel__head"><div><p class="panel__eyebrow">Filament catalog</p><h2>Create or update a filament</h2></div></div>
+                <form id="filament-form" class="form-grid">
+                  <input type="hidden" name="id" />
+                  <label class="field"><span>Manufacturer</span><input name="manufacturer" maxlength="80" required placeholder="Bambu Lab" /></label>
+                  <label class="field"><span>Material / type</span><input name="material" maxlength="80" required placeholder="PLA" /></label>
+                  <label class="field"><span>Color</span><input name="color" maxlength="80" required placeholder="Blue" /></label>
+                  <label class="field"><span>Spool weight (g)</span><input name="spoolWeightGrams" type="number" min="0.01" step="0.01" required /></label>
+                  <p class="helper-text field--full">Net filament weight, excluding the empty spool.</p>
+                  <label class="field" data-opening-stock><span>Full rolls on hand</span><input name="initialRolls" type="number" min="0" step="1" required /></label>
+                  <label class="field" data-opening-stock><span>Additional filament (g)</span><input name="additionalGrams" type="number" min="0" step="0.01" required /></label>
+                  <div class="form-actions field--full">
+                    <button class="button" type="submit">Add filament</button>
+                    <button class="button button--ghost" data-action="cancel-filament-edit" type="button" hidden>Cancel edit</button>
+                  </div>
+                </form>
+              </section>
+              <section class="panel panel--form">
+                <div class="panel__head"><div><p class="panel__eyebrow">Stock management</p><h2>Receive or correct filament</h2></div></div>
+                <form id="filament-stock-form" class="form-grid">
+                  <label class="field field--full"><span>Filament</span><select name="filamentId" required></select></label>
+                  <label class="field field--full"><span>Action</span><select name="action"><option value="receive">Receive full rolls</option><option value="set">Set counted stock</option><option value="adjust">Adjust by grams</option></select></label>
+                  <p id="filament-stock-balance" class="helper-text field--full"></p>
+                  <label class="field" data-stock-field="rolls"><span>Full rolls</span><input name="rolls" type="number" min="1" step="1" /></label>
+                  <label class="field" data-stock-field="additionalGrams"><span>Additional filament (g)</span><input name="additionalGrams" type="number" min="0" step="0.01" /></label>
+                  <label class="field field--full" data-stock-field="deltaGrams"><span>Adjustment (g, positive or negative)</span><input name="deltaGrams" type="number" step="0.01" /></label>
+                  <label class="field field--full"><span>Reason / note</span><textarea name="note" rows="2" maxlength="240" placeholder="Delivery, physical count, waste correction..."></textarea></label>
+                  <p class="helper-text field--full">Filament is deducted when prints are completed. If counting during a print, add back material already used by unfinished units.</p>
+                  <div class="form-actions field--full"><button class="button" type="submit">Receive rolls</button></div>
+                </form>
+              </section>
+            </div>
+            <section class="panel">
+              <div class="panel__head"><div><p class="panel__eyebrow">Available stock</p><h2>Filaments on hand</h2></div><span id="filaments-count" class="panel__meta"></span></div>
+              <p class="helper-text">Balances include deductions for started prints. Roll equivalents describe pooled weight.</p>
+              <div id="filaments-list" class="card-grid"></div>
+            </section>
+          </div>
+          <section class="panel">
+            <div class="panel__head"><div><p class="panel__eyebrow">Inventory ledger</p><h2>Filament activity</h2></div></div>
+            <div id="filaments-activity-toolbar" class="activity-toolbar"></div>
+            <div id="filaments-activity" class="list-stack"></div>
+          </section>
+        </section>
+
         <section id="printers-view" class="view" hidden>
           <div class="split-layout">
             <section class="panel panel--form">
@@ -419,14 +483,10 @@
                   <input name="model" type="text" maxlength="80" placeholder="MK4, X1C, A1 Mini..." />
                 </label>
 
-                <label class="field">
-                  <span>Loaded color</span>
-                  <input name="color" type="text" maxlength="40" placeholder="Blue" required />
-                </label>
-
-                <label class="field">
-                  <span>Loaded material</span>
-                  <input name="material" type="text" maxlength="40" placeholder="PLA" required />
+                <label class="field field--full">
+                  <span>Loaded filament</span>
+                  <select name="filamentId"></select>
+                  <span class="helper-text">Queue coverage matches this exact filament, including manufacturer and spool size.</span>
                 </label>
 
                 <label class="field field--full field--checkbox">
@@ -469,6 +529,22 @@
       </footer>
     </div>
 
+    <dialog id="queue-action-dialog" class="action-dialog" aria-labelledby="queue-action-title">
+      <form id="queue-action-form" class="form-grid">
+        <h2 id="queue-action-title" class="field--full"></h2>
+        <p id="queue-action-part" class="helper-text field--full"></p>
+        <label class="field field--full">
+          <span>Quantity</span>
+          <input name="quantity" type="number" min="1" step="1" required />
+        </label>
+        <div id="queue-action-preview" class="field--full" role="status" aria-live="polite"></div>
+        <p id="queue-action-error" class="filament-warning field--full" role="alert" hidden></p>
+        <div class="form-actions field--full">
+          <button class="button" type="submit">Save</button>
+          <button class="button button--ghost" type="button" data-action="cancel-queue-action">Cancel</button>
+        </div>
+      </form>
+    </dialog>
     <script type="module" src="./app.js"></script>
   </body>
 </html>

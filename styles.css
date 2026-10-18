@@ -1184,3 +1184,157 @@ a {
     grid-column: auto;
   }
 }
+.filament-editors {
+  display: grid;
+  gap: 24px;
+  align-content: start;
+  min-width: 0;
+}
+
+.action-dialog {
+  width: min(520px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px);
+  overflow: auto;
+  border: 1px solid var(--line-strong);
+  padding: 28px;
+  color: var(--text);
+  background: var(--white);
+}
+
+.action-dialog::backdrop {
+  background: rgb(31 15 66 / 50%);
+}
+
+.action-dialog h2 {
+  margin: 0;
+}
+
+.filament-editors .panel--form {
+  position: static;
+}
+
+.filament-warning {
+  color: var(--danger, #a52232);
+  font-weight: 700;
+}
+
+.filament-order-alert {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  margin: 0 40px 20px;
+  padding: 18px 20px;
+  border: 1px solid var(--danger);
+  border-left-width: 5px;
+  background: #fff3f6;
+  color: var(--danger);
+}
+
+.filament-order-alert strong {
+  font-size: 1.15rem;
+}
+
+.filament-order-alert p {
+  margin: 5px 0 0;
+  font-size: 0.9rem;
+}
+
+.filament-order-alert .button {
+  flex-shrink: 0;
+}
+
+.filament-order-panel {
+  scroll-margin-top: 85px;
+}
+
+.filament-order-panel--attention {
+  border-top: 4px solid var(--orange);
+}
+
+.filament-order-panel > .helper-text {
+  margin: 0 0 20px;
+}
+
+.filament-order-setup {
+  margin-bottom: 20px;
+  padding: 16px;
+  background: #fff3f6;
+  border-left: 3px solid var(--danger);
+}
+
+.filament-order-setup p {
+  margin-top: 0;
+}
+
+.filament-order-row {
+  display: grid;
+  grid-template-columns: minmax(160px, 1fr) minmax(0, 2.5fr) auto;
+  align-items: center;
+  gap: 20px;
+  padding: 18px;
+  border: 1px solid var(--line);
+}
+
+.filament-order-row__identity {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.filament-order-row__quantities {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 16px;
+  margin: 0;
+}
+
+.filament-order-row dt {
+  margin-bottom: 5px;
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.filament-order-row dd {
+  margin: 0;
+  font-size: 1.2rem;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.filament-order-row__recommendation dd {
+  color: var(--orange-dark);
+}
+
+@media (max-width: 1100px) {
+  .filament-order-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .filament-order-row__quantities {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+}
+
+@media (max-width: 700px) {
+  .filament-order-alert {
+    flex-direction: column;
+    align-items: stretch;
+    margin-inline: 18px;
+  }
+
+  .filament-order-row {
+    grid-template-columns: 1fr;
+  }
+
+  .filament-order-row__quantities {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+[hidden] {
+  display: none !important;
+}
