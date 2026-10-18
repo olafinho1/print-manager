@@ -191,8 +191,6 @@ async function main() {
     console.log("Skipping stale PR event; the latest PR run owns this preview.");
     return;
   }
-  // Configure Access first: existing sample previews are public until this succeeds.
-  await ensurePreviewAccess(api, identity, productionProject, process.env.CLOUDFLARE_ACCESS_SOURCE_APP_ID);
   let database = await ensurePreviewResources(api, identity, protectedIds, compatibilityDate);
   const sourceId = protectedIds[0];
   let status = await snapshotStatus(api, database.uuid, sourceId);
@@ -203,11 +201,15 @@ async function main() {
     database = await ensurePreviewResources(api, identity, protectedIds, compatibilityDate);
     status = await snapshotStatus(api, database.uuid, sourceId);
   }
+  // The Pages hostname must exist before Access is provisioned. Also recreate
+  // protection if replacing a legacy Pages project removed its Access app.
+  await ensurePreviewAccess(api, identity, productionProject, process.env.CLOUDFLARE_ACCESS_SOURCE_APP_ID);
   const stage = resolve(".preview", identity.name);
   await mkdir(stage, { recursive: true });
   const configPath = join(stage, "wrangler.json");
   await writeFile(configPath, JSON.stringify(previewConfig(identity, database, compatibilityDate, root), null, 2));
   const urls = [`https://${identity.name}.pages.dev`, `https://${identity.branch}.${identity.name}.pages.dev`];
+  console.log(status.snapshot ? `Preserving production snapshot from ${status.snapshot.copied_at}.` : "Preparing a fresh production snapshot.");
   if (!status.snapshot) {
     // Establish Pages DNS/TLS using a maintenance worker with no database binding.
     // It cannot expose or seed data while the clone and migrations are running.
@@ -223,6 +225,7 @@ async function main() {
       targetConfig: configPath, runWrangler, assertPreviewDatabase });
     const verified = await snapshotStatus(api, database.uuid, sourceId);
     if (!verified.snapshot) throw new Error("Production snapshot import was not completed. Retry this workflow.");
+    console.log(`Production snapshot imported (${status.snapshot.copied_at}); applying feature migrations to the copy.`);
   }
   const config = previewConfig(identity, database, compatibilityDate, root, status.snapshot);
   await writeFile(configPath, JSON.stringify(config, null, 2));
