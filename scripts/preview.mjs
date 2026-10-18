@@ -181,7 +181,8 @@ export async function buildPreviewBundle(stage, compatibilityDate, root = proces
 
 export async function verifyPreview(url, fetchImpl = fetch, pause = (ms) => new Promise((done) => setTimeout(done, ms))) {
   let lastError;
-  for (let attempt = 0; attempt < 12; attempt++) {
+  // A newly created Pages project's DNS/TLS certificate can lag its deployment.
+  for (let attempt = 0; attempt < 30; attempt++) {
     try {
       const response = await fetchImpl(`${url}/api/state`, { redirect: "error", signal: AbortSignal.timeout(10000) });
       const state = await response.json();
@@ -191,9 +192,9 @@ export async function verifyPreview(url, fetchImpl = fetch, pause = (ms) => new 
       }
       return;
     } catch (error) { lastError = error; }
-    await pause(3000);
+    if (attempt < 29) await pause(10000);
   }
-  throw new Error(`Preview smoke check failed: ${lastError?.message}`);
+  throw new Error(`Preview smoke check failed: ${lastError?.message}${lastError?.cause?.code ? ` (${lastError.cause.code})` : ""}`);
 }
 
 async function github(path, { method = "GET", body } = {}) {
