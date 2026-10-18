@@ -104,7 +104,54 @@ Cloudflare deploy model:
 - custom domain is the canonical production entrypoint
 - `print-manager.pages.dev` redirects to the custom domain
 
-## Cloudflare Pages configuration
+## Pull request preview environments
+
+`.github/workflows/pr-preview.yml` runs `scripts/preview.mjs` for same-repository PRs on `opened`, `reopened`, `synchronize`, and `closed`. Fork PRs never receive Cloudflare credentials. The workflow tests and builds the PR's head commit before deployment.
+
+Each PR owns a separate Direct Upload Pages project and D1 database named `print-manager-pr-<number>-<repository hash>`. Pages has only production/preview binding scopes, so separate projects avoid different PRs sharing or overwriting a database binding. The main production project and database are not used by this workflow. The script checks project ownership markers, exact database names, and the production database IDs before acting.
+
+### One-time setup
+
+1. Create a Cloudflare API token scoped to this account with **Account / Cloudflare Pages / Edit** and **Account / D1 / Edit**. Keep the token in GitHub Secrets; never commit it.
+2. Add repository Actions secrets `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` under **Settings → Secrets and variables → Actions**. Find the account ID in Cloudflare's account overview. These are build-time secrets, not app runtime bindings.
+3. Enable GitHub Actions for this repository. The workflow requests `contents: read`, `pull-requests: read`, and `deployments: write` for its temporary GitHub token.
+4. In the production Pages project's **Builds & deployments → Branch control**, disable native Git preview builds to avoid duplicate previews. The explicit empty `[env.preview].d1_databases` in `wrangler.toml` also prevents future native preview builds of this branch from inheriting production D1. Existing native deployments are unaffected by a config edit.
+
+The generated preview config binds only that PR's D1 and sets `APP_ENV=preview` and `ALLOW_SAMPLE_RESET=false`. The header identifies the app as a test environment. The preview is a public `pages.dev` site with synthetic data; the custom production domain's Access policy does not automatically cover it. Use synthetic data when testing.
+
+Cloudflare references: [CI Direct Upload](https://developers.cloudflare.com/pages/how-to/use-direct-upload-with-continuous-integration/), [Pages configuration environments](https://developers.cloudflare.com/pages/functions/wrangler-configuration/), and [D1 migrations](https://developers.cloudflare.com/d1/reference/migrations/).
+
+### Lifecycle
+
+- **Open/reopen:** create or recover the PR's resources, run every pending migration with `wrangler d1 migrations apply`, seed sample parts/products/printers/filaments and open sales orders, compile Pages Functions, deploy, and smoke-test `/api/state` and its metadata. GitHub shows the preview link as a deployment and in the Actions run summary.
+- **Update:** reuse the same D1, apply only pending migration files, and deploy the new head. A `preview_seed` marker prevents reseeding. Operator changes made during testing remain intact. Add new numbered migration files; editing an already applied file will not rerun it.
+- **Close/merge:** remove the Pages project and its deployments, then delete its D1. Verify both are gone and mark GitHub preview deployments inactive. Reopening creates fresh resources and sample data.
+
+Runs for one PR are serialized without canceling the running job. The script reads the current PR state before acting: stale revisions skip deployment, and an already closed PR triggers cleanup. Resource creation/deletion can be retried after partial failures. Seed inserts use `INSERT OR IGNORE`, so a failed first import can resume without resetting existing rows. Cleanup refuses a mismatched project/database and leaves D1 intact if deleting the serving project fails.
+
+The seed uses the app's sample-data serializer with only inserts retained. It includes assembly and direct products, synthetic sales orders, and 250 g of each sample filament so ordering warnings are easy to exercise. It never imports production state. The advanced-mode `_worker.js` bundle packages the existing Pages Functions alongside the Vite assets, allowing deployment from an isolated directory/config.
+
+### Test the cycle
+
+1. Open a PR and wait for **Cloudflare PR preview** to pass. Open its deployment URL and confirm the **Preview environment · test data** header, open sales orders, and filament ordering overview.
+2. Receive a roll or adjust stock with an operator name. Verify activity includes the actor and timestamp. Exercise Complete prints, assembly, and direct-product packing.
+3. Push another commit. Verify the preview updates, the database is unchanged, the stock adjustment remains, and the Actions summary says **preserved**. For a schema change, add a new migration and confirm it is applied before deployment.
+4. Close the PR. Confirm the cleanup run succeeds, the GitHub deployment is inactive, and both the Pages project and D1 are absent in Cloudflare.
+5. Reopen the PR if testing should continue; it receives newly seeded data.
+
+Local validation without Cloudflare credentials:
+
+```bash
+npm test
+npm run build
+node scripts/preview.mjs build
+```
+
+The last command compiles the same deployable worker/assets into ignored `.preview/local-build`. Lifecycle tests cover resource isolation, retries, deletion order, seed preservation, real SQL migrations, and environment smoke checks.
+
+If provisioning or cleanup fails, inspect the Actions error, correct the token permissions or resource conflict, and rerun the failed job. Rerunning an old deployment after closing a PR performs cleanup using the current PR state. A failed seed is retried; a completed seed is never reset. GitHub does not trigger `pull_request` workflows for some conflicted PR states, and disabling Actions prevents cleanup; in those cases, rerun an existing job after resolving the condition or remove only that PR's named project and database in Cloudflare. Do not use the production migration command to repair a preview.
+
+## Production Pages configuration
 
 Current build settings:
 

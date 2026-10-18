@@ -693,11 +693,14 @@ import { gramsToMilligrams, filamentLabel, printerMatchesFilament, consumptionQu
 
   function renderHeader() {
     if (dom.signedInUser) {
-      dom.signedInUser.textContent = ui.currentUser.authenticated
+      const identity = ui.currentUser.authenticated
         ? `Signed in as ${ui.currentUser.email}`
         : ui.appMeta.environment === "local"
           ? "Local development session"
           : "Authentication not detected";
+      dom.signedInUser.textContent = ui.appMeta.environment === "preview"
+        ? `Preview environment · test data${ui.currentUser.authenticated ? ` · ${identity}` : ""}`
+        : identity;
     }
 
     if (dom.operatorLabel) {
