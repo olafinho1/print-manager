@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { TestD1 } from "./helpers/d1.js";
 import {
   ensureSchema, readState, replaceState, applyQueueAction, saveFilament, adjustFilamentInventory,
-  deleteFilament, savePart, savePrinter, SEED_STATE, seedStateIfEmpty, withMutationState,
+  deleteFilament, savePart, savePrinter, adjustPartInventory, assembleProduct, packProduct, saveProduct, SEED_STATE, seedStateIfEmpty, withMutationState,
 } from "../functions/api/_lib/store.js";
 import { gramsToMilligrams, printerMatchesFilament, futureFilamentDemand, consumptionQuantity } from "../filament-model.js";
 
@@ -212,7 +212,7 @@ test("changed filament settings reject both stale-client and overlapping consump
   const stale = await queuePayload(db, "complete", 1);
   let part = (await readState(db)).parts[0];
   await savePart(db, { ...part, filamentGramsPerUnit: 20 });
-  await assert.rejects(applyQueueAction(db, stale), /settings changed/);
+  await assert.rejects(applyQueueAction(db, stale), /Refresh and retry/);
   const overlapping = await queuePayload(db, "complete", 1);
   part = (await readState(db)).parts[0];
   db.beforeMutationBatch = () => savePart(db, { ...part, filamentGramsPerUnit: 30 });
@@ -263,7 +263,7 @@ test("opening roll stock is deduplicated and filament-only databases are never r
 
 test("fresh SQL migration and runtime upgrades are repeatable and sample restore round-trips", async (t) => {
   const db = new TestD1(); t.after(() => db.close());
-  for (const file of ["0001_initial", "0002_inventory_ledger", "0003_sales_orders", "0004_filaments", "0004_filaments", "0005_completion_filament", "0005_completion_filament"]) {
+  for (const file of ["0001_initial", "0002_inventory_ledger", "0003_sales_orders", "0004_filaments", "0004_filaments", "0005_completion_filament", "0005_completion_filament", "0006_part_production", "0006_part_production"]) {
     db.sqlite.exec(readFileSync(new URL(`../migrations/${file}.sql`, import.meta.url), "utf8"));
   }
   await ensureSchema(db); await ensureSchema(db);
@@ -322,4 +322,187 @@ test("restore retains print events referenced by filament history beyond the rec
   await replaceState(db, snapshot);
   assert.equal(await stock(db), 987.66);
   assert.equal((await readState(db)).filamentInventoryMovements[0].printEventId, event);
+});
+
+async function partStockPayload(db, delta, partId = "p", extras = {}) {
+  const part = (await readState(db)).parts.find((part) => part.id === partId);
+  return { partId, delta, reason: "manual_add", note: "Extra bed capacity", actor: "Stock operator",
+    requestId: crypto.randomUUID(), expectedIsPrinted: part.isPrinted,
+    expectedFilamentId: part.filamentId, expectedFilamentGramsPerUnit: part.filamentGramsPerUnit, ...extras };
+}
+const partStock = async (db, delta, partId, extras) => adjustPartInventory(db, await partStockPayload(db, delta, partId, extras));
+
+test("manual printed stock additions consume decimal grams, snapshot linked history, and never refund QC removals", async (t) => {
+  const db = await fixture(t);
+  const command = await partStockPayload(db, 3);
+  await adjustPartInventory(db, command);
+  await adjustPartInventory(db, command);
+  assert.equal(await stock(db), 962.98);
+  let state = await readState(db);
+  assert.equal(state.parts[0].inventoryQty, 3);
+  assert.equal(state.printEvents.length, 0);
+  assert.equal(state.printState.length, 0);
+  const movement = state.filamentInventoryMovements[0];
+  assert.equal(movement.quantity, 3);
+  assert.equal(movement.gramsPerUnit, 12.34);
+  assert.equal(movement.reason, "part_stock_added");
+  assert.equal(movement.actor, "Stock operator");
+  assert.equal(movement.printEventId, null);
+  assert.equal(movement.partMovementId, state.partInventoryMovements[0].id);
+  assert.equal(movement.createdAt, state.partInventoryMovements[0].createdAt);
+  assert(Number.isFinite(Date.parse(movement.createdAt)));
+  await partStock(db, -1, "p", { reason: "manual_adjustment", note: "QC rejected" });
+  assert.equal(await stock(db), 962.98);
+  assert.equal((await readState(db)).parts[0].inventoryQty, 2);
+  // Changing usage and reducing inventory does not alter past charges.
+  await savePart(db, { ...(await readState(db)).parts[0], filamentGramsPerUnit: 20 });
+  await partStock(db, 1, "p", { reason: "manual_adjustment" });
+  state = await readState(db);
+  assert.equal(state.filaments[0].stockGrams, 942.98);
+  assert(state.filamentInventoryMovements.some((entry) => entry.id === movement.id && entry.gramsPerUnit === 12.34));
+  await assert.rejects(adjustPartInventory(db, { ...command, delta: 4 }), /different action/);
+  await partStock(db, 100);
+  assert.equal(await stock(db), -1057.02);
+});
+
+test("non-printed components need no filament, remain in BOM stock, and cannot be printed", async (t) => {
+  const db = await fixture(t);
+  await savePart(db, { id: "screw", name: "Screw", isPrinted: false, inventoryQty: 1, filamentId: "missing", filamentGramsPerUnit: "invalid", printTimeMinutes: 99 });
+  await partStock(db, 9, "screw");
+  await partStock(db, -1, "screw");
+  const component = (await readState(db)).parts.find((part) => part.id === "screw");
+  assert.equal(component.isPrinted, false);
+  assert.equal(component.inventoryQty, 9);
+  assert.equal(component.filamentId, null);
+  assert.equal(component.filamentGramsPerUnit, null);
+  assert.equal(component.printTimeMinutes, 0);
+  assert.equal(await stock(db), 1000);
+  await saveProduct(db, { id: "kit", name: "Kit", requiresAssembly: true, partRequirements: [{ partId: "p", quantity: 1 }, { partId: "screw", quantity: 2 }] });
+  await partStock(db, 2);
+  const balance = await stock(db);
+  await assembleProduct(db, { productId: "kit", quantity: 2, actor: "Assembler" });
+  await packProduct(db, { productId: "kit", quantity: 1, actor: "Packer" });
+  await saveProduct(db, { id: "bag", name: "Screw", requiresAssembly: false, partRequirements: [{ partId: "screw", quantity: 1 }] });
+  await assert.rejects(assembleProduct(db, { productId: "bag", quantity: 1 }), /does not require assembly/);
+  await packProduct(db, { productId: "bag", quantity: 1, actor: "Packer" });
+  const state = await readState(db);
+  assert.equal(state.parts.find((part) => part.id === "screw").inventoryQty, 4);
+  assert.equal(state.products.find((product) => product.id === "bag").finishedStock, 0);
+  assert.equal(await stock(db), balance);
+  for (const action of ["plan", "start", "complete", "fail", "retry"]) await assert.rejects(queue(db, action, 1, "screw"), /Queue row not found/);
+  await assert.rejects(savePart(db, { ...component, isPrinted: true }), /Select a filament/);
+  await savePart(db, { ...component, isPrinted: true, filamentId: "f", filamentGramsPerUnit: 1 });
+  await partStock(db, 1, "screw");
+  assert.equal(await stock(db), balance - 1);
+});
+
+test("stock corrections validate whole quantities and missing setup without retroactive charges", async (t) => {
+  const db = await fixture(t, { parts: [{ id: "p", name: "Legacy", inventoryQty: 5 }, { id: "p2", name: "Other" }] });
+  assert.equal((await readState(db)).parts[0].isPrinted, true);
+  await assert.rejects(partStock(db, 1), /Configure/);
+  await partStock(db, -1);
+  assert.equal(await stock(db), 1000);
+  for (const delta of [0, 1.5, "1x", Infinity, Number.MAX_SAFE_INTEGER + 1]) await assert.rejects(partStock(db, delta), /whole number/);
+  await assert.rejects(partStock(db, -5), /below zero/);
+  await savePart(db, { ...(await readState(db)).parts[0], isPrinted: false });
+  await partStock(db, 2);
+  assert.equal(await stock(db), 1000);
+  assert.equal((await readState(db)).parts[0].inventoryQty, 6);
+});
+
+test("manual additions and queue completions combine arithmetically, while stale queue actions conflict", async (t) => {
+  const db = await fixture(t);
+  const completion = await queuePayload(db, "complete", 1);
+  const manual = await partStockPayload(db, 3);
+  db.beforeMutationBatch = () => applyQueueAction(db, completion);
+  await adjustPartInventory(db, manual);
+  assert.equal((await readState(db)).parts[0].inventoryQty, 4);
+  assert.equal(await stock(db), 950.64);
+  const stale = await queuePayload(db, "complete", 1);
+  db.beforeMutationBatch = () => partStock(db, 2);
+  await assert.rejects(applyQueueAction(db, stale), /Refresh and retry/);
+  assert.equal((await readState(db)).parts[0].inventoryQty, 6);
+  assert.equal(await stock(db), 925.96);
+  // Distinct manual additions, including the same part and shared filament, all survive.
+  const one = await partStockPayload(db, 1);
+  const two = await partStockPayload(db, 2);
+  db.beforeMutationBatch = () => adjustPartInventory(db, two);
+  await adjustPartInventory(db, one);
+  db.beforeMutationBatch = () => partStock(db, 1, "p2");
+  await partStock(db, 2);
+  assert.equal((await readState(db)).parts[0].inventoryQty, 11);
+  assert.equal(await stock(db), 851.92);
+});
+
+test("competing QC corrections cannot make inventory negative and never return filament", async (t) => {
+  const db = await fixture(t);
+  await partStock(db, 1);
+  const first = await partStockPayload(db, -1);
+  const second = await partStockPayload(db, -1);
+  db.beforeMutationBatch = () => adjustPartInventory(db, second);
+  await assert.rejects(adjustPartInventory(db, first), /Refresh and retry/);
+  assert.equal((await readState(db)).parts[0].inventoryQty, 0);
+  assert.equal(await stock(db), 987.66);
+});
+
+test("manual stock rejects changed production/filament settings and failed batches roll back all accounting", async (t) => {
+  const db = await fixture(t);
+  const stale = await partStockPayload(db, 1);
+  await savePart(db, { ...(await readState(db)).parts[0], filamentGramsPerUnit: 20 });
+  await assert.rejects(adjustPartInventory(db, stale), /settings changed/);
+  const command = await partStockPayload(db, 2);
+  await db.exec("CREATE TRIGGER fail_stock_link BEFORE INSERT ON filament_part_stock_movements BEGIN SELECT RAISE(ABORT, 'link failure'); END");
+  await assert.rejects(adjustPartInventory(db, command), /link failure/);
+  let state = await readState(db);
+  assert.equal(state.parts[0].inventoryQty, 0);
+  assert.equal(state.filamentInventoryMovements.length, 0);
+  assert.equal(state.partInventoryMovements.length, 0);
+  assert.equal(await stock(db), 1000);
+  await db.exec("DROP TRIGGER fail_stock_link");
+  await adjustPartInventory(db, command);
+  assert.equal(await stock(db), 960);
+  const overlap = await partStockPayload(db, 1);
+  db.beforeMutationBatch = async () => savePart(db, { ...(await readState(db)).parts[0], isPrinted: false });
+  await assert.rejects(adjustPartInventory(db, overlap), /Refresh and retry/);
+  await assert.rejects(adjustPartInventory(db, overlap), /production settings changed/);
+  assert.equal(await stock(db), 960);
+  const nonPrinted = await partStockPayload(db, 1);
+  db.beforeMutationBatch = async () => savePart(db, { ...(await readState(db)).parts[0], isPrinted: true, filamentId: "f", filamentGramsPerUnit: 10 });
+  await assert.rejects(adjustPartInventory(db, nonPrinted), /Refresh and retry/);
+});
+
+test("part detail edits preserve concurrent stock; changing production type preserves history and blocks outstanding tracking", async (t) => {
+  const db = await fixture(t);
+  const original = (await readState(db)).parts[0];
+  db.beforeMutationBatch = () => partStock(db, 3);
+  await savePart(db, { ...original, name: "Edited", inventoryQty: 999 });
+  assert.equal((await readState(db)).parts[0].inventoryQty, 3);
+  assert.equal(await stock(db), 962.98);
+  await savePart(db, { ...original, isPrinted: false });
+  assert.equal(await stock(db), 962.98);
+  assert.equal((await readState(db)).filamentInventoryMovements.length, 1);
+  await savePart(db, { ...original, isPrinted: true });
+  await queue(db, "start", 1);
+  await assert.rejects(savePart(db, { ...original, isPrinted: false }), /Resolve planned/);
+  await queue(db, "complete", 1);
+  db.beforeMutationBatch = () => queue(db, "start", 1);
+  await assert.rejects(savePart(db, { ...original, isPrinted: false }), /Refresh and retry/);
+});
+
+test("repeatable production migration and restore preserve bookkeeping parts and linked history beyond 400 stock entries", async (t) => {
+  const db = await fixture(t);
+  await partStock(db, 1);
+  await savePart(db, { id: "screw", name: "Screw", isPrinted: false, inventoryQty: 1000 });
+  const insert = db.sqlite.prepare("INSERT INTO part_inventory_movements (id, part_id, delta_qty, reason, created_at) VALUES (?, 'screw', -1, 'manual_adjustment', '2099-01-01T00:00:00.000Z')");
+  for (let i = 0; i < 405; i++) insert.run(`qc-${i}`);
+  const sql = readFileSync(new URL("../migrations/0006_part_production.sql", import.meta.url), "utf8");
+  db.sqlite.exec(sql); db.sqlite.exec(sql);
+  await ensureSchema(db); await ensureSchema(db);
+  const before = await readState(db);
+  assert(before.partInventoryMovements.some((entry) => entry.id === before.filamentInventoryMovements[0].partMovementId));
+  await replaceState(db, before);
+  const after = await readState(db);
+  assert.deepEqual(after.filamentInventoryMovements, before.filamentInventoryMovements);
+  assert.deepEqual(after.parts.map(({ queueVersion, ...part }) => part), before.parts.map(({ queueVersion, ...part }) => part));
+  await assert.rejects(deleteFilament(db, "f"), /referenced/);
 });

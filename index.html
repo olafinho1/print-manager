@@ -209,7 +209,7 @@
               <div class="panel__head">
                 <div>
                   <p class="panel__eyebrow">Part editor</p>
-                  <h2>Create or update a printed part</h2>
+                  <h2>Create or update a part</h2>
                 </div>
               </div>
               <form id="part-form" class="form-grid">
@@ -225,6 +225,12 @@
                   <input name="sku" type="text" maxlength="40" placeholder="WHIM-LEG-S" />
                 </label>
 
+                <label class="field field--full field--checkbox">
+                  <input name="isPrinted" type="checkbox" checked />
+                  <span>3D printed — uses filament</span>
+                </label>
+                <p class="helper-text field--full">Uncheck for purchased or other non-printed components. They remain in inventory and product requirements without entering the print queue.</p>
+
                 <label class="field field--full">
                   <span>Filament</span>
                   <select name="filamentId" required></select>
@@ -239,6 +245,7 @@
                 <label class="field">
                   <span>Inventory on hand</span>
                   <input name="inventoryQty" type="number" min="0" step="1" required />
+                  <span class="helper-text" data-part-stock-help></span>
                 </label>
 
                 <label class="field">
@@ -289,7 +296,7 @@
               <div class="panel__head">
                 <div>
                   <p class="panel__eyebrow">Part inventory</p>
-                  <h2 id="parts-title">Printed parts on hand</h2>
+                  <h2 id="parts-title">Parts on hand</h2>
                 </div>
                 <span id="parts-count" class="panel__meta"></span>
               </div>
@@ -334,7 +341,7 @@
 
                 <label class="field field--full field--checkbox">
                   <input name="requiresAssembly" type="checkbox" checked />
-                  <span>Requires assembly from printed parts</span>
+                  <span>Requires assembly from parts</span>
                 </label>
 
                 <label class="field field--full">
@@ -355,7 +362,7 @@
                 <div id="product-requirements-section" class="field field--full">
                   <div class="subhead">
                     <div>
-                      <span class="subhead__title">Required printed parts</span>
+                      <span class="subhead__title">Required parts</span>
                       <p class="subhead__copy">Each row defines the quantity needed to build one finished unit.</p>
                     </div>
                     <button id="add-requirement-button" class="button button--secondary" data-action="add-requirement" type="button">
