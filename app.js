@@ -421,8 +421,9 @@ import { gramsToMilligrams, filamentLabel, printerMatchesFilament, consumptionQu
     dom.partForm.addEventListener("input", () => {
       ui.partFormDraft = readPartForm();
     });
-    dom.partForm.addEventListener("change", () => {
+    dom.partForm.addEventListener("change", (event) => {
       ui.partFormDraft = readPartForm();
+      if (event.target.name === "isPrinted") renderPartForm();
     });
     dom.partForm.addEventListener("submit", handlePartSubmit);
 
@@ -837,7 +838,7 @@ import { gramsToMilligrams, filamentLabel, printerMatchesFilament, consumptionQu
   function renderSummaryCards(computed) {
     dom.summaryCards.innerHTML = [
       {
-        label: "Printed parts on hand",
+        label: "Parts on hand",
         valueLabel: formatNumber(computed.totalPartInventory),
         detail: `${computed.parts.length} tracked part SKUs`,
       },
@@ -930,7 +931,7 @@ import { gramsToMilligrams, filamentLabel, printerMatchesFilament, consumptionQu
       `;
       },
       "No sellable product stock is currently available.",
-      "For direct products, printed part stock is already sellable. Assembly products still require assembly.",
+      "For direct products, part stock is already sellable. Assembly products still require assembly.",
     );
 
     dom.blockedProducts.innerHTML = renderList(
@@ -1096,6 +1097,16 @@ import { gramsToMilligrams, filamentLabel, printerMatchesFilament, consumptionQu
     setInputValue(dom.partForm, "id", draft.id);
     setInputValue(dom.partForm, "name", draft.name);
     setInputValue(dom.partForm, "sku", draft.sku);
+    dom.partForm.elements.isPrinted.checked = draft.isPrinted !== false;
+    for (const name of ["filamentId", "filamentGramsPerUnit", "printTimeMinutes", "fileRef"]) {
+      const input = dom.partForm.elements[name];
+      input.disabled = draft.isPrinted === false;
+      input.closest("label").hidden = draft.isPrinted === false;
+    }
+    dom.partForm.elements.inventoryQty.readOnly = Boolean(draft.id);
+    dom.partForm.querySelector("[data-part-stock-help]").textContent = draft.id
+      ? "Use Add stock or Adjust to change stock and account for filament."
+      : "Opening balance of existing parts; no filament is deducted retrospectively.";
     renderFilamentSelect(dom.partForm.elements.filamentId, draft.filamentId);
     setInputValue(dom.partForm, "filamentGramsPerUnit", draft.filamentGramsPerUnit ?? "");
     setInputValue(dom.partForm, "inventoryQty", draft.inventoryQty);
@@ -1125,7 +1136,7 @@ import { gramsToMilligrams, filamentLabel, printerMatchesFilament, consumptionQu
       return;
     }
 
-    dom.partsTitle.textContent = "Printed parts on hand";
+    dom.partsTitle.textContent = "Parts on hand";
     dom.partsCount.textContent = `${computed.parts.length} tracked`;
     dom.partsList.hidden = false;
     dom.partsActivityToolbar.hidden = true;
@@ -1174,7 +1185,7 @@ import { gramsToMilligrams, filamentLabel, printerMatchesFilament, consumptionQu
               <button class="button button--small button--ghost" data-action="adjust-part-stock" data-id="${escapeHtml(part.id)}" type="button">
                 Adjust
               </button>
-              <button class="button button--small button--ghost" data-action="queue-part" data-id="${escapeHtml(part.id)}" type="button">
+              <button class="button button--small button--ghost" data-action="queue-part" data-id="${escapeHtml(part.id)}" type="button" ${part.isPrinted === false ? "hidden" : ""}>
                 View queue
               </button>
               <button class="button button--small button--danger" data-action="delete-part" data-id="${escapeHtml(part.id)}" type="button">
@@ -1185,7 +1196,7 @@ import { gramsToMilligrams, filamentLabel, printerMatchesFilament, consumptionQu
         `;
       },
       "No parts have been created yet.",
-      "Start by defining the printed parts your farm produces.",
+      "Track parts and other components used in your products.",
     );
   }
 
@@ -1224,8 +1235,8 @@ import { gramsToMilligrams, filamentLabel, printerMatchesFilament, consumptionQu
           <span class="chip">${escapeHtml(part.color)}</span>
           <span class="chip">${escapeHtml(part.material)}</span>
           <span class="chip">Min ${formatNumber(part.minStock)}</span>
-          <span class="chip">${escapeHtml(formatDurationMinutes(part.printTimeMinutes))} each</span>
-          <span class="chip">Planned/running ${formatNumber(openJobs)}</span>
+          ${part.isPrinted !== false ? `<span class="chip">${escapeHtml(formatDurationMinutes(part.printTimeMinutes))} each</span>
+          <span class="chip">Planned/running ${formatNumber(openJobs)}</span>` : ""}
         </div>
 
         <div class="stats-grid">
@@ -1241,10 +1252,10 @@ import { gramsToMilligrams, filamentLabel, printerMatchesFilament, consumptionQu
             <span class="stat__label">Gap to current demand</span>
             <div class="stat__value">${formatNumber(demandGap)}</div>
           </div>
-          <div class="stat">
+          ${part.isPrinted !== false ? `<div class="stat">
             <span class="stat__label">Print time</span>
             <div class="stat__value">${escapeHtml(formatDurationMinutes(part.printTimeMinutes))}</div>
-          </div>
+          </div>` : ""}
         </div>
 
         ${
@@ -1283,7 +1294,7 @@ import { gramsToMilligrams, filamentLabel, printerMatchesFilament, consumptionQu
           <button class="button button--small" data-action="edit-part" data-id="${escapeHtml(part.id)}" type="button">Edit</button>
           <button class="button button--small button--secondary" data-action="add-part-stock" data-id="${escapeHtml(part.id)}" type="button">Add stock</button>
           <button class="button button--small button--ghost" data-action="adjust-part-stock" data-id="${escapeHtml(part.id)}" type="button">Adjust</button>
-          <button class="button button--small button--ghost" data-action="queue-part" data-id="${escapeHtml(part.id)}" type="button">View queue</button>
+          <button class="button button--small button--ghost" data-action="queue-part" data-id="${escapeHtml(part.id)}" type="button" ${part.isPrinted === false ? "hidden" : ""}>View queue</button>
           <button class="button button--small button--danger" data-action="delete-part" data-id="${escapeHtml(part.id)}" type="button">Delete</button>
         </div>
       </article>
@@ -1355,7 +1366,7 @@ import { gramsToMilligrams, filamentLabel, printerMatchesFilament, consumptionQu
         : `
             <div class="empty-state">
               <h3>No required parts yet</h3>
-              <p>Add at least one printed part requirement for this product.</p>
+              <p>Add at least one part requirement for this product.</p>
             </div>
           `;
 
@@ -1367,11 +1378,11 @@ import { gramsToMilligrams, filamentLabel, printerMatchesFilament, consumptionQu
     });
 
     dom.requirementsTitle.textContent = draft.requiresAssembly
-      ? "Required printed parts"
-      : "Printed part for this product";
+      ? "Required parts"
+      : "Part for this product";
     dom.requirementsCopy.textContent = draft.requiresAssembly
       ? "Each row defines the quantity needed to build one finished unit."
-      : "Products without assembly still reference exactly one printed part.";
+      : "Products without assembly still reference exactly one part.";
     dom.addRequirementButton.hidden = !draft.requiresAssembly;
 
     dom.productForm.querySelector('button[type="submit"]').textContent = draft.id ? "Save product" : "Add product";
@@ -1471,7 +1482,7 @@ import { gramsToMilligrams, filamentLabel, printerMatchesFilament, consumptionQu
               `
               : product.requiresAssembly
                 ? '<p class="helper-text">All required parts are available for the next unit.</p>'
-                : '<p class="helper-text">This product uses one printed part directly and does not need assembly.</p>'
+                : '<p class="helper-text">This product uses one part directly and does not need assembly.</p>'
           }
 
           ${product.notes ? `<p class="helper-text">${formatParagraph(product.notes)}</p>` : ""}
@@ -1526,7 +1537,7 @@ import { gramsToMilligrams, filamentLabel, printerMatchesFilament, consumptionQu
       `;
       },
       "No products have been created yet.",
-      "Each product links finished goods to the printed parts needed to assemble it.",
+      "Each product links finished goods to the parts needed to assemble it.",
     );
   }
 
@@ -1857,14 +1868,15 @@ import { gramsToMilligrams, filamentLabel, printerMatchesFilament, consumptionQu
   }
 
   function hasFilamentSetup(part) {
-    return Boolean(part.filamentId && gramsToMilligrams(part.filamentGramsPerUnit) > 0 && state.filaments.some((f) => f.id === part.filamentId));
+    return Boolean(part.isPrinted !== false && part.filamentId && gramsToMilligrams(part.filamentGramsPerUnit) > 0 && state.filaments.some((f) => f.id === part.filamentId));
   }
 
   function partFilamentMarkup(part) {
+    if (part.isPrinted === false) return '<p class="helper-text">Not 3D printed · No filament used</p>';
     const filament = state.filaments.find((f) => f.id === part.filamentId);
     return hasFilamentSetup(part)
       ? `<p class="helper-text">${escapeHtml([filament.manufacturer, filament.material, filament.color].join(" · "))} · ${escapeHtml(formatGrams(part.filamentGramsPerUnit))} per unit</p>`
-      : `<p class="helper-text filament-warning">Filament setup required before starting or completing prints.${part.color || part.material ? ` Previous setup: ${escapeHtml(part.color)} / ${escapeHtml(part.material)}.` : ""}</p>`;
+      : `<p class="helper-text filament-warning">Filament setup required before printing or adding stock.${part.color || part.material ? ` Previous setup: ${escapeHtml(part.color)} / ${escapeHtml(part.material)}.` : ""}</p>`;
   }
 
   function queueFilamentMarkup(row) {
@@ -1933,7 +1945,7 @@ import { gramsToMilligrams, filamentLabel, printerMatchesFilament, consumptionQu
         subtitle: "Filament inventory", scope: "filament", actionKey: entry.reason,
         badgeLabel: `${entry.deltaGrams > 0 ? "+" : ""}${formatGrams(entry.deltaGrams)}`,
         badgeClass: entry.deltaGrams >= 0 ? "badge--active" : "badge--inactive",
-        description: ({ opening_balance: "Opening filament balance", rolls_received: "Full rolls received", stock_count: "Stock count recorded", manual_adjustment: "Filament stock corrected", print_completed: "Filament consumed for completed prints", print_started: "Filament consumed at print start (previous policy)", direct_completion: "Filament consumed for directly completed units" })[entry.reason] || entry.reason,
+        description: ({ opening_balance: "Opening filament balance", rolls_received: "Full rolls received", stock_count: "Stock count recorded", manual_adjustment: "Filament stock corrected", part_stock_added: "Filament consumed for added part stock", print_completed: "Filament consumed for completed prints", print_started: "Filament consumed at print start (previous policy)", direct_completion: "Filament consumed for directly completed units" })[entry.reason] || entry.reason,
         note: entry.note, actor: entry.actor, timestamp: entry.createdAt,
       };
     }).sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
@@ -2034,8 +2046,8 @@ import { gramsToMilligrams, filamentLabel, printerMatchesFilament, consumptionQu
 
     try {
       const payload = normalizePart(readPartForm());
-      if (!payload.name || !payload.filamentId || !(gramsToMilligrams(payload.filamentGramsPerUnit) > 0)) {
-        window.alert("Part name, filament, and positive grams per unit are required.");
+      if (!payload.name || (payload.isPrinted && (!payload.filamentId || !(gramsToMilligrams(payload.filamentGramsPerUnit) > 0)))) {
+        window.alert("Part name is required. 3D printed parts also need a filament and positive grams per unit.");
         return;
       }
 
@@ -2072,7 +2084,7 @@ import { gramsToMilligrams, filamentLabel, printerMatchesFilament, consumptionQu
 
       if (payload.requiresAssembly) {
         if (!payload.partRequirements.length) {
-          window.alert("Add at least one required printed part for products that require assembly.");
+          window.alert("Add at least one required part for products that require assembly.");
           return;
         }
 
@@ -2099,7 +2111,7 @@ import { gramsToMilligrams, filamentLabel, printerMatchesFilament, consumptionQu
       } else {
         const singleRequirement = payload.partRequirements.find((requirement) => requirement.partId);
         if (!singleRequirement) {
-          window.alert("Products without assembly still need one printed part.");
+          window.alert("Products without assembly still need one part.");
           return;
         }
         payload.finishedStock = 0;
@@ -2326,6 +2338,7 @@ import { gramsToMilligrams, filamentLabel, printerMatchesFilament, consumptionQu
   }
 
   async function adjustPartStock(id, mode) {
+    if (ui.saving) return;
     const part = state.parts.find((entry) => entry.id === id);
     if (!part) {
       return;
@@ -2333,7 +2346,7 @@ import { gramsToMilligrams, filamentLabel, printerMatchesFilament, consumptionQu
 
     const promptText =
       mode === "add"
-        ? `How many completed "${part.name}" parts should be added to inventory?`
+        ? `How many "${part.name}" parts should be added to inventory? Enter a negative number to remove stock without returning filament.`
         : `Enter a signed quantity adjustment for "${part.name}" inventory.`;
     const defaultValue = mode === "add" ? "1" : "0";
     const response = window.prompt(promptText, defaultValue);
@@ -2341,26 +2354,44 @@ import { gramsToMilligrams, filamentLabel, printerMatchesFilament, consumptionQu
       return;
     }
 
-    const delta = parseInteger(response);
-    if (delta === null) {
-      window.alert("Enter a whole number.");
+    const delta = Number(response);
+    if (!Number.isSafeInteger(delta) || delta === 0) {
+      window.alert("Enter a non-zero whole number.");
       return;
     }
 
-    const appliedDelta = mode === "add" ? Math.abs(delta) : delta;
+    const appliedDelta = delta;
     const nextQty = part.inventoryQty + appliedDelta;
     if (nextQty < 0) {
       window.alert("Inventory cannot go below zero.");
       return;
     }
 
+    if (appliedDelta > 0 && part.isPrinted !== false) {
+      if (!hasFilamentSetup(part)) {
+        window.alert("Configure this printed part's filament and grams per unit before adding stock, or mark it as not 3D printed.");
+        return;
+      }
+      const filament = state.filaments.find((entry) => entry.id === part.filamentId);
+      const consumptionMg = appliedDelta * gramsToMilligrams(part.filamentGramsPerUnit);
+      if (!Number.isSafeInteger(consumptionMg)) {
+        window.alert("Filament consumption is too large.");
+        return;
+      }
+      const balance = (gramsToMilligrams(filament.stockGrams) - consumptionMg) / 1000;
+      if (!window.confirm(`Add ${appliedDelta} ${part.name} to stock?\n\n${formatGrams(consumptionMg / 1000)} of ${filamentLabel(filament)} will be used (${formatGrams(part.filamentGramsPerUnit)} per unit).\nAvailable afterward: ${formatGrams(balance)}.${balance < 0 ? "\nStock will be negative; you can still continue." : ""}\n\nUse Complete prints instead if these units are tracked in the queue. Add stock does not close running prints.`)) return;
+    }
+
     await mutateState(API_ENDPOINTS.partsInventory, {
       partId: id,
+      expectedIsPrinted: part.isPrinted !== false,
+      expectedFilamentId: part.filamentId,
+      expectedFilamentGramsPerUnit: part.filamentGramsPerUnit,
       delta: appliedDelta,
       reason: mode === "add" ? "manual_add" : "manual_adjustment",
       note:
         mode === "add"
-          ? "Completed parts added through the Add stock action."
+          ? "Part stock changed through the Add stock action."
           : "Inventory adjusted through the Adjust action.",
     });
     render();
@@ -2396,7 +2427,7 @@ import { gramsToMilligrams, filamentLabel, printerMatchesFilament, consumptionQu
     }
 
     if (!product.requiresAssembly) {
-      window.alert("This product does not require assembly. Its printed part stock is already the sellable stock.");
+      window.alert("This product does not require assembly. Its part stock is already the sellable stock.");
       return;
     }
 
@@ -2639,6 +2670,7 @@ import { gramsToMilligrams, filamentLabel, printerMatchesFilament, consumptionQu
       .sort((left, right) => right.minStockGap - left.minStockGap);
 
     const productionQueue = parts
+      .filter((part) => part.isPrinted !== false)
       .map((part) => {
         const demand = demandModel.partDemandById.get(part.id);
         const requiredQty = demand?.requiredQty || 0;
@@ -2912,7 +2944,7 @@ import { gramsToMilligrams, filamentLabel, printerMatchesFilament, consumptionQu
               shortages.push({
                 productName: product.name,
                 shortageQty: needed - reserved,
-                stockLabel: `${part?.name || "printed part"} units`,
+                stockLabel: `${part?.name || "part"} units`,
               });
             }
           });
@@ -2980,6 +3012,9 @@ import { gramsToMilligrams, filamentLabel, printerMatchesFilament, consumptionQu
       id: dom.partForm.elements.id.value,
       name: dom.partForm.elements.name.value.trim(),
       sku: dom.partForm.elements.sku.value.trim(),
+      isPrinted: dom.partForm.elements.isPrinted.checked,
+      color: ui.partFormDraft.color || "",
+      material: ui.partFormDraft.material || "",
       filamentId: dom.partForm.elements.filamentId.value || null,
       filamentGramsPerUnit: dom.partForm.elements.filamentGramsPerUnit.value,
       inventoryQty: dom.partForm.elements.inventoryQty.value,
@@ -3040,12 +3075,13 @@ import { gramsToMilligrams, filamentLabel, printerMatchesFilament, consumptionQu
       sku: part.sku,
       color: part.color,
       material: part.material,
-      filamentId: part.filamentId || null,
-      filamentGramsPerUnit: part.filamentGramsPerUnit ?? null,
+      isPrinted: part.isPrinted !== false,
+      filamentId: part.isPrinted === false ? null : part.filamentId || null,
+      filamentGramsPerUnit: part.isPrinted === false ? null : part.filamentGramsPerUnit ?? null,
       queueVersion: part.queueVersion || 0,
       inventoryQty: toNonNegativeInteger(part.inventoryQty),
       minStock: toNonNegativeInteger(part.minStock),
-      printTimeMinutes: toNonNegativeInteger(part.printTimeMinutes),
+      printTimeMinutes: part.isPrinted === false ? 0 : toNonNegativeInteger(part.printTimeMinutes),
       imageRef: part.imageRef || "",
       fileRef: part.fileRef,
       notes: part.notes,
@@ -3096,6 +3132,7 @@ import { gramsToMilligrams, filamentLabel, printerMatchesFilament, consumptionQu
 
   function blankPartDraft() {
     return {
+      isPrinted: true,
       id: "",
       name: "",
       sku: "",
@@ -3930,8 +3967,9 @@ import { gramsToMilligrams, filamentLabel, printerMatchesFilament, consumptionQu
   }
 
   function describePartMovement(reason, partName) {
+    if (reason === "opening_balance") return `Opening stock for ${partName}.`;
     if (reason === "manual_add") {
-      return `Added completed ${partName} stock.`;
+      return `Changed ${partName} stock through Add stock.`;
     }
     if (reason === "manual_adjustment") {
       return `Adjusted ${partName} inventory manually.`;

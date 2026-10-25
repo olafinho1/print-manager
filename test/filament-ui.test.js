@@ -7,15 +7,16 @@ import * as filamentModel from "../filament-model.js";
 
 // Exercise the app's real view-model and markup functions without starting a
 // browser or changing the production bundle's public interface.
-function appFixture() {
+function appFixture(options = {}) {
   const source = readFileSync(new URL("../app.js", import.meta.url), "utf8")
     .replace(/^import .*;$/gm, "")
     .replace("  init();", "")
-    .replace(/\}\)\(\);\s*$/, "return { ui, state, dom, applyRemoteMeta, renderHeader, renderFilamentOrdering, renderQueueActionPreview, queueActionLimit, normalizeRemoteState, replaceStateInMemory, computeState, renderQueueCard, buildFilamentActivityEntries, filterActivityEntries }; })();");
+    .replace("  function render() {", options.skipRender ? "  function render() { return;" : "  function render() {")
+    .replace(/\}\)\(\);\s*$/, "return { ui, state, dom, adjustPartStock, renderPartForm, readPartForm, normalizePart, partFilamentMarkup, renderPartDetail, applyRemoteMeta, renderHeader, renderFilamentOrdering, renderQueueActionPreview, queueActionLimit, normalizeRemoteState, replaceStateInMemory, computeState, renderQueueCard, buildFilamentActivityEntries, filterActivityEntries }; })();");
   const app = runInNewContext(source, {
-    buildDemandModel, ...filamentModel,
-    window: { location: { hostname: "localhost" }, sessionStorage: { getItem: () => null } },
-    document: { querySelector: () => null, querySelectorAll: () => [] },
+    buildDemandModel, ...filamentModel, crypto,
+    window: { location: { hostname: "localhost" }, sessionStorage: { getItem: () => null }, ...options.window },
+    document: { body: { setAttribute() {}, removeAttribute() {} }, querySelector: () => null, querySelectorAll: () => [] },
   });
   app.replaceStateInMemory(app.normalizeRemoteState({
     filaments: ["f", "g"].map((id) => ({ id, manufacturer: id, material: "PLA", color: "Blue", spoolWeightGrams: 1000, stockGrams: 100 })),
@@ -168,4 +169,108 @@ test("preview snapshot metadata survives frontend normalization and appears in t
   assert.equal(app.ui.appMeta.previewSnapshotAt, "2026-10-18T20:00:00.000Z");
   assert.match(app.dom.signedInUser.textContent, /Preview environment · production snapshot from/);
   assert.match(app.dom.signedInUser.textContent, /operator@example.com/);
+});
+
+test("non-printed parts keep sales shortages and product requirements but leave print timing and filament demand", () => {
+  const app = appFixture();
+  app.state.parts[0] = app.normalizePart({ ...app.state.parts[0], isPrinted: false });
+  app.state.printState = [];
+  const computed = app.computeState();
+  assert.equal(computed.currentDemandByPartId.get("p"), 6);
+  assert.equal(computed.currentDemandGapByPartId.get("p"), 6);
+  assert.equal(computed.queueByPartId.has("p"), false);
+  assert.equal(computed.productionQueue.length, 1);
+  assert.equal(computed.totalQueueParallelTimeMinutes, 90);
+  assert.equal(computed.productSummaries.find((product) => product.id === "p").buildableNow, 0);
+  assert.equal(filamentModel.futureFilamentDemand(computed.productionQueue).has("f"), false);
+  assert.match(app.partFilamentMarkup(app.state.parts[0]), /Not 3D printed/);
+  assert.doesNotMatch(app.partFilamentMarkup(app.state.parts[0]), /setup required/);
+  assert.match(app.renderPartDetail(computed.partsById.get("p"), computed), /data-action="queue-part"[^>]*hidden/);
+  assert.equal(app.state.parts[0].filamentId, null);
+  assert.equal(app.state.parts[0].filamentGramsPerUnit, null);
+  assert.equal(app.state.parts[0].printTimeMinutes, 0);
+  // Helpers also ignore malformed rows with leftover filament settings.
+  const row = { part: { isPrinted: false, filamentId: "f", filamentGramsPerUnit: 99 }, plannedQty: 4, remainingQty: 10 };
+  assert.equal(filamentModel.futureFilamentDemand([row]).size, 0);
+  assert.equal(filamentModel.printerMatchesFilament({ filamentId: "f" }, row.part), false);
+});
+
+test("part editor hides print fields for bookkeeping parts and keeps existing stock read-only", () => {
+  const app = appFixture();
+  const names = ["id", "name", "sku", "isPrinted", "filamentId", "filamentGramsPerUnit", "inventoryQty", "minStock", "printTimeMinutes", "imageRef", "fileRef", "notes"];
+  const labels = Object.fromEntries(names.map((name) => [name, {}]));
+  const elements = Object.fromEntries(names.map((name) => [name, { closest: () => labels[name] }]));
+  const helper = {};
+  app.dom.partForm = { elements, querySelector: (selector) => selector === "[data-part-stock-help]" ? helper : selector.startsWith('[name=') ? elements[selector.match(/"(.+)"/)[1]] : {} };
+  app.ui.partFormDraft = { ...app.state.parts[0], isPrinted: false };
+  app.renderPartForm();
+  assert.equal(elements.isPrinted.checked, false);
+  assert.equal(elements.filamentId.disabled, true);
+  assert.equal(labels.filamentGramsPerUnit.hidden, true);
+  assert.equal(labels.printTimeMinutes.hidden, true);
+  assert.equal(elements.inventoryQty.readOnly, true);
+  assert.match(helper.textContent, /Add stock or Adjust/);
+  app.ui.partFormDraft = { ...app.ui.partFormDraft, id: "", isPrinted: true };
+  app.renderPartForm();
+  assert.equal(elements.filamentId.disabled, false);
+  assert.equal(labels.filamentGramsPerUnit.hidden, false);
+  assert.equal(elements.inventoryQty.readOnly, false);
+  assert.match(helper.textContent, /no filament is deducted retrospectively/);
+});
+
+test("Add stock previews consumption and deficits; signed removals are not turned into additions", async () => {
+  let response = "3";
+  let confirmations = [];
+  let sent = [];
+  const app = appFixture({ skipRender: true, window: {
+    prompt: () => response,
+    confirm: (message) => { confirmations.push(message); return true; },
+    alert: (message) => { throw Error(message); },
+    fetch: async (url, request) => {
+      sent.push(JSON.parse(request.body));
+      return { ok: true, json: async () => ({ state: JSON.parse(JSON.stringify(app.state)) }) };
+    },
+  } });
+  app.state.parts[0].filamentGramsPerUnit = 12.34;
+  app.state.parts[0].inventoryQty = 5;
+  app.state.filaments[0].stockGrams = 20;
+  await app.adjustPartStock("p", "add");
+  assert.equal(sent[0].delta, 3);
+  assert.equal(sent[0].expectedIsPrinted, true);
+  assert.equal(sent[0].expectedFilamentGramsPerUnit, 12.34);
+  assert.match(confirmations[0], /37.02 g/);
+  assert.match(confirmations[0], /-17.02 g/);
+  assert.match(confirmations[0], /Stock will be negative/);
+  response = "-1";
+  await app.adjustPartStock("p", "add");
+  assert.equal(sent[1].delta, -1);
+  assert.equal(confirmations.length, 1);
+  response = "2";
+  await app.adjustPartStock("p", "adjust");
+  assert.equal(sent[2].delta, 2);
+  assert.equal(confirmations.length, 2);
+  app.state.parts[0] = app.normalizePart({ ...app.state.parts[0], isPrinted: false });
+  await app.adjustPartStock("p", "add");
+  assert.equal(sent[3].expectedIsPrinted, false);
+  assert.equal(sent[3].expectedFilamentId, null);
+  assert.equal(confirmations.length, 2);
+});
+
+test("cancelling the stock preview and invalid/unconfigured inputs send no mutation", async () => {
+  let response = "2";
+  const alerts = [];
+  const app = appFixture({ skipRender: true, window: {
+    prompt: () => response, confirm: () => false, alert: (text) => alerts.push(text),
+    fetch: () => { throw Error("Must not send a mutation"); },
+  } });
+  await app.adjustPartStock("p", "add");
+  for (const invalid of ["1.5", "2x", "0", "", "-1"]) {
+    response = invalid;
+    await app.adjustPartStock("p", "add");
+  }
+  assert.equal(alerts.length, 5);
+  response = "1";
+  app.state.parts[0].filamentId = null;
+  await app.adjustPartStock("p", "add");
+  assert.match(alerts.at(-1), /Configure/);
 });

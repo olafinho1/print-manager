@@ -14,7 +14,7 @@ export function filamentLabel(filament) {
 }
 
 export function printerMatchesFilament(printer, part) {
-  return Boolean(printer.filamentId && part.filamentId && printer.filamentId === part.filamentId);
+  return Boolean(part.isPrinted !== false && printer.filamentId && part.filamentId && printer.filamentId === part.filamentId);
 }
 
 export function consumptionQuantity(action, quantity, prepaidFilamentQty = 0) {
@@ -24,6 +24,7 @@ export function consumptionQuantity(action, quantity, prepaidFilamentQty = 0) {
 export function futureFilamentDemand(queueRows) {
   const demand = new Map();
   for (const row of queueRows) {
+    if (row.part.isPrinted === false) continue;
     const mg = gramsToMilligrams(row.part.filamentGramsPerUnit);
     if (!row.part.filamentId || !mg) continue;
     const required = (row.plannedQty + row.remainingQty + (row.inProgressQty || 0) - (row.prepaidFilamentQty || 0)) * mg;
@@ -49,8 +50,14 @@ export function filamentOrderingNeeds(filaments, queueRows) {
 
 // Only the explicitly requested sample dataset receives invented filament values.
 export function addSampleFilaments(sample) {
+  if (!sample.parts.some((part) => part.id === "sample-component-screw")) sample.parts.push({
+    id: "sample-component-screw", name: "M3 screw", sku: "SCREW-M3", isPrinted: false,
+    color: "", material: "Steel", inventoryQty: 24, minStock: 10, printTimeMinutes: 0,
+    filamentId: null, filamentGramsPerUnit: null, imageRef: "", fileRef: "", notes: "Purchased component; no filament usage.",
+  });
   const setups = new Map();
   for (const part of sample.parts) {
+    if (part.isPrinted === false) continue;
     const key = `${part.material}-${part.color}`;
     if (!setups.has(key)) setups.set(key, {
       id: `sample-filament-${key.toLowerCase()}`, manufacturer: "Sample manufacturer",

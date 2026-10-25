@@ -2,8 +2,8 @@
 
 Cloudflare Pages app for tracking:
 
-- printed part inventory
-- products and their required printed parts
+- printed and non-printed part inventory
+- products and their required parts
 - finished goods inventory
 - buildable products
 - low-stock parts
@@ -105,9 +105,11 @@ Use **Filaments** to add a manufacturer, material/type, color, and net spool wei
 
 The dashboard starts with **Filament to order**, listing shortages in grams and suggested whole rolls, largest shortages first. It includes current stock deficits and future queue demand. An alert above the main metrics links to this list from every tab. Queued parts missing filament settings are flagged so incomplete estimates cannot appear fully covered.
 
-Select one filament and enter grams per unit on every part. Include supports and waste in the slicer estimate. Set each printer's loaded filament to enable exact queue matching; manufacturers and spool sizes are not interchangeable automatically.
+Keep **3D printed — uses filament** checked for printed parts, then select a filament and enter grams per unit. Uncheck it for purchased or other non-printed components: they remain in inventory, product requirements, and sales shortages, but do not need filament or enter the print queue. Include supports and waste in the slicer estimate. Set each printer's loaded filament to enable exact queue matching; manufacturers and spool sizes are not interchangeable automatically.
 
-**Complete prints** deducts the completed quantity you enter × the part’s current grams per unit. The same calculation applies to in-progress, planned, and directly completed units. **Start**, **Fail**, and **Retry** do not deduct filament. Use a stock adjustment to record filament wasted on failed prints or other differences. Negative balances warn without blocking production. Assembly, packing, and manual part-stock changes do not consume filament.
+**Complete prints** deducts the completed quantity you enter × the part’s current grams per unit. The same calculation applies to in-progress, planned, and directly completed units. **Start**, **Fail**, and **Retry** do not deduct filament. Use a stock adjustment to record filament wasted on failed prints or other differences. Negative balances warn without blocking production. For printed parts, **Add stock** and positive **Adjust** entries also deduct the added quantity × grams per unit, with a consumption/balance preview before saving. Negative entries only remove parts; they never return filament, including QC rejections. Non-printed components, assembly, and packing do not consume filament.
+
+Opening part balances describe existing stock and do not consume filament retrospectively. Once a part exists, change its stock through Add stock or Adjust; editing its details preserves the balance. Add stock records extra units independently of queue progress: use Complete prints for tracked units so the same units are not entered twice. Resolve any planned, running, or failed print tracking before changing a part to non-printed.
 
 Queue actions open an in-page quantity dialog. Complete prints shows the live consumption estimate and resulting balance as you edit the completed quantity. Future filament demand includes planned, unplanned, and in-progress quantities that have not been charged yet. Conflicts keep the dialog open so the operator can review refreshed values before retrying.
 
